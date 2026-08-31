@@ -507,6 +507,13 @@ export default function Home() {
             <Button variant="outline" onClick={exportBackup}>
               <Download data-icon="inline-start" /> สำรองข้อมูล
             </Button>
+            <Button
+              variant="outline"
+              className="border-emerald-600/30 text-emerald-700 hover:bg-emerald-50 dark:hover:bg-emerald-950/20"
+              onClick={() => setCashOpen(true)}
+            >
+              <WalletCards data-icon="inline-start" /> ฝาก-ถอน / ปรับ Balance
+            </Button>
             <Button variant="outline" onClick={() => setSettingsOpen(true)}>
               <Settings2 data-icon="inline-start" /> ตั้งค่า
             </Button>
@@ -659,12 +666,22 @@ export default function Home() {
         </section>
 
         <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-          <MetricCard
-            icon={<WalletCards />}
-            label="Balance หลังปิดออเดอร์"
-            value={money(accountBalance)}
-            note={`Realized P/L ${signedMoney(realizedPnl)}`}
-          />
+          <div className="relative">
+            <MetricCard
+              icon={<WalletCards />}
+              label="Balance หลังปิดออเดอร์"
+              value={money(accountBalance)}
+              note={`Realized P/L ${signedMoney(realizedPnl)}`}
+            />
+            <button
+              type="button"
+              onClick={() => setCashOpen(true)}
+              className="absolute right-3.5 top-3.5 rounded bg-emerald-50 px-2 py-1 text-xs font-semibold text-emerald-700 hover:bg-emerald-100 dark:bg-emerald-950/50 dark:text-emerald-300 transition-colors shadow-xs"
+              title="ฝาก-ถอน หรือปรับยอด Balance"
+            >
+              ฝาก/ถอน/ปรับ
+            </button>
+          </div>
           <MetricCard
             icon={<CircleDollarSign />}
             label="Equity ปัจจุบัน"
@@ -935,6 +952,7 @@ export default function Home() {
       <CashFlowDialog
         open={cashOpen}
         onOpenChange={setCashOpen}
+        currentBalance={accountBalance}
         onSubmit={(flow) => {
           setState((current) => ({
             ...current,
@@ -943,8 +961,31 @@ export default function Home() {
           }));
           setCashOpen(false);
           setNotice(
-            flow.kind === 'DEPOSIT' ? 'บันทึกการเพิ่มทุนแล้ว' : 'บันทึกการถอนทุนแล้ว',
+            flow.kind === 'DEPOSIT'
+              ? 'บันทึกการฝากเงินเรียบร้อยแล้ว'
+              : 'บันทึกการถอนเงินเรียบร้อยแล้ว',
           );
+        }}
+        onSetBalance={(targetBalance, note) => {
+          const diff = targetBalance - accountBalance;
+          if (Math.abs(diff) < 0.001) {
+            setCashOpen(false);
+            return;
+          }
+          const flow: CashFlow = {
+            id: crypto.randomUUID(),
+            kind: diff > 0 ? 'DEPOSIT' : 'WITHDRAWAL',
+            amount: Number(Math.abs(diff).toFixed(2)),
+            occurredAt: new Date().toISOString(),
+            note: note.trim() || `ปรับยอด Balance เป็น ${money(targetBalance)}`,
+          };
+          setState((current) => ({
+            ...current,
+            cashFlows: [flow, ...current.cashFlows],
+            updatedAt: new Date().toISOString(),
+          }));
+          setCashOpen(false);
+          setNotice(`ปรับยอด Balance เป็น ${money(targetBalance)} เรียบร้อยแล้ว`);
         }}
       />
       {marketOpen && (
@@ -1444,75 +1485,168 @@ function CloseOrderDialog({
 function CashFlowDialog({
   open,
   onOpenChange,
+  currentBalance,
   onSubmit,
+  onSetBalance,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  currentBalance: number;
   onSubmit: (flow: CashFlow) => void;
+  onSetBalance: (targetBalance: number, note: string) => void;
 }) {
-  const [kind, setKind] = useState<CashFlow['kind']>('DEPOSIT');
+  const [mode, setMode] = useState<'SET_BALANCE' | 'DEPOSIT' | 'WITHDRAWAL'>(
+    'SET_BALANCE',
+  );
+  const [targetBalance, setTargetBalance] = useState('');
   const [amount, setAmount] = useState('');
-  const [occurredAt, setOccurredAt] = useState(nowForInput());
   const [note, setNote] = useState('');
+
+  useEffect(() => {
+    if (open) {
+      setTargetBalance(
+        currentBalance > 0 ? String(Number(currentBalance.toFixed(2))) : '',
+      );
+      setAmount('');
+      setNote('');
+    }
+  }, [open, currentBalance]);
+
   const submit = (event: React.SyntheticEvent<HTMLFormElement>) => {
     event.preventDefault();
+    if (mode === 'SET_BALANCE') {
+      const val = Number(targetBalance);
+      if (!Number.isFinite(val) || val < 0) return;
+      onSetBalance(val, note);
+      return;
+    }
+
     const value = Number(amount);
     if (!(value > 0)) return;
     onSubmit({
       id: crypto.randomUUID(),
-      kind,
-      amount: value,
-      occurredAt: new Date(occurredAt).toISOString(),
+      kind: mode,
+      amount: Number(value.toFixed(2)),
+      occurredAt: new Date().toISOString(),
       note: note.trim(),
     });
     setAmount('');
     setNote('');
-    setOccurredAt(nowForInput());
   };
+
+  const calculatedNewBalance =
+    mode === 'SET_BALANCE'
+      ? Number(targetBalance) || 0
+      : mode === 'DEPOSIT'
+        ? currentBalance + (Number(amount) || 0)
+        : currentBalance - (Number(amount) || 0);
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
+      <DialogContent className="sm:max-w-lg">
         <DialogHeader>
-          <DialogTitle>เพิ่มหรือถอนทุน</DialogTitle>
+          <DialogTitle>ฝาก-ถอน / ปรับยอด Balance</DialogTitle>
           <DialogDescription>
-            การปรับทุนจะมีประวัติและนำไปคำนวณ Balance
+            กำหนดตัวเลข Balance ให้ตรงกับพอร์ต MT4/MT5 หรือบันทึกการฝาก-ถอนเงิน
           </DialogDescription>
         </DialogHeader>
         <form onSubmit={submit} className="grid gap-4">
-          <Field label="ประเภท">
-            <NativeSelect
-              className="w-full"
-              value={kind}
-              onChange={(event) =>
-                setKind(event.target.value as CashFlow['kind'])
+          <div className="grid grid-cols-3 gap-1 rounded-lg bg-muted p-1 text-xs">
+            <button
+              type="button"
+              onClick={() => setMode('SET_BALANCE')}
+              className={`rounded-md py-1.5 font-medium transition-colors ${
+                mode === 'SET_BALANCE'
+                  ? 'bg-background text-foreground shadow-sm'
+                  : 'text-muted-foreground hover:text-foreground'
+              }`}
+            >
+              🎯 ปรับยอด Balance
+            </button>
+            <button
+              type="button"
+              onClick={() => setMode('DEPOSIT')}
+              className={`rounded-md py-1.5 font-medium transition-colors ${
+                mode === 'DEPOSIT'
+                  ? 'bg-background text-foreground shadow-sm'
+                  : 'text-muted-foreground hover:text-foreground'
+              }`}
+            >
+              ➕ ฝากเงิน
+            </button>
+            <button
+              type="button"
+              onClick={() => setMode('WITHDRAWAL')}
+              className={`rounded-md py-1.5 font-medium transition-colors ${
+                mode === 'WITHDRAWAL'
+                  ? 'bg-background text-foreground shadow-sm'
+                  : 'text-muted-foreground hover:text-foreground'
+              }`}
+            >
+              ➖ ถอนเงิน
+            </button>
+          </div>
+
+          <div className="rounded-lg border border-border/80 bg-muted/40 p-3 text-xs leading-5">
+            <div className="flex justify-between">
+              <span className="text-muted-foreground">Balance ปัจจุบัน:</span>
+              <span className="font-mono font-semibold">{money(currentBalance)}</span>
+            </div>
+            <div className="flex justify-between font-medium text-emerald-700 dark:text-emerald-400">
+              <span>Balance หลังการปรับ:</span>
+              <span className="font-mono font-bold">
+                {money(calculatedNewBalance)}
+              </span>
+            </div>
+          </div>
+
+          {mode === 'SET_BALANCE' ? (
+            <Field label="ยอด Balance ที่ต้องการกำหนด (USD)">
+              <Input
+                type="number"
+                min="0"
+                step="0.01"
+                placeholder="เช่น 4400.03"
+                value={targetBalance}
+                onChange={(event) => setTargetBalance(event.target.value)}
+              />
+              <span className="text-[11px] text-muted-foreground">
+                พิมพ์ตัวเลข Balance ใน MT4/MT5 ของคุณได้เลย ยอด Balance จะเปลี่ยนเป็นเลขนี้ทันที
+              </span>
+            </Field>
+          ) : (
+            <Field
+              label={
+                mode === 'DEPOSIT'
+                  ? 'จำนวนเงินที่ฝากเพิ่ม (USD)'
+                  : 'จำนวนเงินที่ถอนออก (USD)'
               }
             >
-              <NativeSelectOption value="DEPOSIT">เพิ่มทุน</NativeSelectOption>
-              <NativeSelectOption value="WITHDRAWAL">ถอนทุน</NativeSelectOption>
-            </NativeSelect>
-          </Field>
-          <Field label="จำนวนเงิน (USD)">
+              <Input
+                type="number"
+                min="0"
+                step="0.01"
+                placeholder="เช่น 1000"
+                value={amount}
+                onChange={(event) => setAmount(event.target.value)}
+              />
+            </Field>
+          )}
+
+          <Field label="หมายเหตุ (ไม่บังคับ)">
             <Input
-              type="number"
-              min="0"
-              step="0.01"
-              value={amount}
-              onChange={(event) => setAmount(event.target.value)}
-            />
-          </Field>
-          <Field label="วันที่และเวลา">
-            <Input
-              type="datetime-local"
-              value={occurredAt}
-              onChange={(event) => setOccurredAt(event.target.value)}
-            />
-          </Field>
-          <Field label="บันทึก">
-            <Textarea
               value={note}
               onChange={(event) => setNote(event.target.value)}
+              placeholder={
+                mode === 'SET_BALANCE'
+                  ? 'เช่น ปรับยอดตรงกับโบรกเกอร์'
+                  : mode === 'DEPOSIT'
+                    ? 'เช่น ฝากเงินเพิ่ม'
+                    : 'เช่น ถอนกำไร'
+              }
             />
           </Field>
+
           <DialogFooter>
             <Button
               type="button"
@@ -1521,7 +1655,9 @@ function CashFlowDialog({
             >
               ยกเลิก
             </Button>
-            <Button type="submit">บันทึก</Button>
+            <Button type="submit">
+              {mode === 'SET_BALANCE' ? 'บันทึกยอด Balance' : 'บันทึกรายการ'}
+            </Button>
           </DialogFooter>
         </form>
       </DialogContent>
