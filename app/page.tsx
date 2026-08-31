@@ -6,10 +6,13 @@ import {
   ArrowDownRight,
   ArrowUpRight,
   CircleDollarSign,
+  CloudCheck,
   Download,
   History,
   KeyRound,
   Landmark,
+  LogIn,
+  LogOut,
   PencilLine,
   Plus,
   RefreshCw,
@@ -22,6 +25,15 @@ import {
   X,
 } from 'lucide-react';
 
+import {
+  getCloudPortfolio,
+  loginWithGoogle,
+  logoutFirebase,
+  saveCloudPortfolio,
+  subscribeToAuth,
+  subscribeToCloudPortfolio,
+} from '@/lib/firebase';
+import type { User } from 'firebase/auth';
 import { TradingViewChart } from '@/components/tradingview-chart';
 
 import { Badge } from '@/components/ui/badge';
@@ -140,6 +152,11 @@ export default function Home() {
   );
   const [chartOpen, setChartOpen] = useState(true);
   const [autoSync, setAutoSync] = useState(false);
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [cloudSyncStatus, setCloudSyncStatus] = useState<
+    'disconnected' | 'syncing' | 'synced' | 'error'
+  >('disconnected');
+  const isSyncingFromCloud = useRef(false);
   const fileInput = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -150,6 +167,7 @@ export default function Home() {
     return () => window.clearInterval(timer);
   }, [autoSync, marketApiKey]);
 
+  // โหลดข้อมูลพอร์ตจาก IndexedDB ในเครื่องก่อน
   useEffect(() => {
     loadPortfolio()
       .then((saved) => {
@@ -164,6 +182,62 @@ export default function Home() {
       });
   }, []);
 
+  // ติดตามสถานะ Login Google และดึงข้อมูลพอร์ตจาก Cloud
+  useEffect(() => {
+    const unsub = subscribeToAuth(async (user) => {
+      setCurrentUser(user);
+      if (user) {
+        setCloudSyncStatus('syncing');
+        try {
+          const cloudState = await getCloudPortfolio(user.uid);
+          if (cloudState && cloudState.orders) {
+            isSyncingFromCloud.current = true;
+            setState(normalizePortfolioState(cloudState));
+            await savePortfolio(normalizePortfolioState(cloudState));
+            setTimeout(() => {
+              isSyncingFromCloud.current = false;
+            }, 100);
+          } else {
+            await saveCloudPortfolio(user.uid, state);
+          }
+          setCloudSyncStatus('synced');
+          setNotice(`เข้าสู่ระบบ Google สำเร็จ (${user.displayName || user.email})`);
+        } catch (error) {
+          console.error(error);
+          setCloudSyncStatus('error');
+        }
+      } else {
+        setCloudSyncStatus('disconnected');
+      }
+    });
+    return () => unsub();
+  }, []);
+
+  // ฟังการเปลี่ยนแปลงจากอุปกรณ์อื่นแบบ Realtime (ถ้าเปิดในคอมและมือถือพร้อมกัน)
+  useEffect(() => {
+    if (!currentUser) return;
+    const unsub = subscribeToCloudPortfolio(
+      currentUser.uid,
+      (cloudData) => {
+        if (cloudData && cloudData.orders) {
+          isSyncingFromCloud.current = true;
+          setState(normalizePortfolioState(cloudData));
+          void savePortfolio(normalizePortfolioState(cloudData));
+          setTimeout(() => {
+            isSyncingFromCloud.current = false;
+          }, 100);
+          setCloudSyncStatus('synced');
+        }
+      },
+      (error) => {
+        console.error('Firestore sync error:', error);
+        setCloudSyncStatus('error');
+      },
+    );
+    return () => unsub();
+  }, [currentUser]);
+
+  // บันทึกข้อมูลลง IndexedDB ในเครื่อง และส่งขึ้น Cloud เมื่อมีการแก้ไข
   useEffect(() => {
     if (!ready) return;
     const timer = window.setTimeout(() => {
@@ -171,9 +245,20 @@ export default function Home() {
       savePortfolio(state)
         .then(() => setSaveStatus('saved'))
         .catch(() => setSaveStatus('error'));
-    }, 180);
+
+      // ถ้าล็อกอินอยู่และไม่ใช่จังหวะที่รับข้อมูลมาจาก Cloud ให้อัปโหลดขึ้น Cloud
+      if (currentUser && !isSyncingFromCloud.current) {
+        setCloudSyncStatus('syncing');
+        saveCloudPortfolio(currentUser.uid, state)
+          .then(() => setCloudSyncStatus('synced'))
+          .catch((error) => {
+            console.error('Cloud save error:', error);
+            setCloudSyncStatus('error');
+          });
+      }
+    }, 200);
     return () => window.clearTimeout(timer);
-  }, [ready, state]);
+  }, [ready, state, currentUser]);
 
   useEffect(() => {
     if (!notice) return;
@@ -299,6 +384,25 @@ export default function Home() {
     }
   };
 
+  const handleGoogleLogin = async () => {
+    try {
+      await loginWithGoogle();
+    } catch (error) {
+      setNotice(
+        error instanceof Error ? error.message : 'เข้าสู่ระบบ Google ไม่สำเร็จ',
+      );
+    }
+  };
+
+  const handleGoogleLogout = async () => {
+    try {
+      await logoutFirebase();
+      setNotice('ออกจากระบบแล้ว ข้อมูลในเครื่องยังคงอยู่');
+    } catch {
+      setNotice('ออกจากระบบไม่สำเร็จ');
+    }
+  };
+
   return (
     <main className="min-h-screen bg-background text-foreground">
       {notice && (
@@ -345,7 +449,45 @@ export default function Home() {
               และการปิดบางส่วน
             </p>
           </div>
-          <div className="flex flex-wrap gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            {currentUser ? (
+              <div className="flex items-center gap-2 rounded-lg border border-border/80 bg-muted/65 px-2.5 py-1 text-xs">
+                {currentUser.photoURL ? (
+                  <img
+                    src={currentUser.photoURL}
+                    alt={currentUser.displayName || 'User'}
+                    className="size-6 rounded-full border border-border"
+                  />
+                ) : (
+                  <CloudCheck className="size-4 text-emerald-600" />
+                )}
+                <div className="hidden sm:block">
+                  <span className="block max-w-[130px] truncate font-medium text-foreground">
+                    {currentUser.displayName || currentUser.email}
+                  </span>
+                  <span className="flex items-center gap-1 text-[10px] text-emerald-600">
+                    <CloudCheck className="size-3" />
+                    {cloudSyncStatus === 'syncing' ? 'กำลังซิงค์...' : 'Sync คลาวด์แล้ว'}
+                  </span>
+                </div>
+                <Button
+                  size="icon-xs"
+                  variant="ghost"
+                  onClick={handleGoogleLogout}
+                  title="ออกจากระบบ"
+                >
+                  <LogOut className="size-3.5 text-muted-foreground hover:text-foreground" />
+                </Button>
+              </div>
+            ) : (
+              <Button
+                variant="outline"
+                className="border-primary/40 bg-primary/5 text-primary hover:bg-primary/10"
+                onClick={handleGoogleLogin}
+              >
+                <LogIn data-icon="inline-start" /> เข้าสู่ระบบ Google เพื่อ Sync
+              </Button>
+            )}
             <input
               ref={fileInput}
               type="file"
