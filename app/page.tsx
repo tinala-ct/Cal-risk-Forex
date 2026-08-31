@@ -16,10 +16,13 @@ import {
   Save,
   Settings2,
   ShieldAlert,
+  TrendingUp,
   Upload,
   WalletCards,
   X,
 } from 'lucide-react';
+
+import { TradingViewChart } from '@/components/tradingview-chart';
 
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -132,6 +135,10 @@ export default function Home() {
     () => window.localStorage.getItem(MARKET_UPDATED_AT_STORAGE) ?? '',
   );
   const [closingOrder, setClosingOrder] = useState<Order | null>(null);
+  const [chartSymbol, setChartSymbol] = useState<'OANDA:XAUUSD' | 'TVC:USOIL'>(
+    'OANDA:XAUUSD',
+  );
+  const [chartOpen, setChartOpen] = useState(true);
   const fileInput = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -413,6 +420,65 @@ export default function Home() {
             ราคาตลาดเป็น XAU/USD spot และ WTI/USD spot จาก Twelve Data อาจต่างจาก
             Bid/Ask ของ XM; ตรวจราคาใน MT4/MT5 ก่อนใช้ตัดสินใจจริง
           </p>
+        </section>
+
+        <section className="mb-4">
+          <Card className="border border-border/80 shadow-[0_14px_42px_-38px_rgb(15_23_42/0.6)]">
+            <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between border-b border-border/60 pb-3">
+              <div>
+                <CardTitle className="flex items-center gap-2 text-base">
+                  <TrendingUp className="size-4 text-primary" />
+                  กราฟราคา Realtime (TradingView)
+                </CardTitle>
+                <CardDescription className="text-xs">
+                  ข้อมูลสด Realtime จากตลาดโลก • ไม่ต้องใช้ API Key • ปลอดภัย 100% ไม่เสี่ยง Key หลุด
+                </CardDescription>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="inline-flex rounded-lg bg-muted p-1 text-xs">
+                  <button
+                    type="button"
+                    onClick={() => setChartSymbol('OANDA:XAUUSD')}
+                    className={`rounded-md px-3 py-1.5 font-medium transition-colors ${
+                      chartSymbol === 'OANDA:XAUUSD'
+                        ? 'bg-background text-foreground shadow-sm'
+                        : 'text-muted-foreground hover:text-foreground'
+                    }`}
+                  >
+                    ทองคำ (XAU/USD)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setChartSymbol('TVC:USOIL')}
+                    className={`rounded-md px-3 py-1.5 font-medium transition-colors ${
+                      chartSymbol === 'TVC:USOIL'
+                        ? 'bg-background text-foreground shadow-sm'
+                        : 'text-muted-foreground hover:text-foreground'
+                    }`}
+                  >
+                    น้ำมันดิบ (USOIL)
+                  </button>
+                </div>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setChartOpen(!chartOpen)}
+                >
+                  {chartOpen ? 'ซ่อนกราฟ' : 'แสดงกราฟ'}
+                </Button>
+              </div>
+            </CardHeader>
+            {chartOpen && (
+              <CardContent className="p-2 sm:p-4">
+                <TradingViewChart
+                  symbol={chartSymbol}
+                  theme="light"
+                  interval="15"
+                  height={480}
+                />
+              </CardContent>
+            )}
+          </Card>
         </section>
 
         <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
