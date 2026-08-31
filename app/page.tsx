@@ -139,7 +139,16 @@ export default function Home() {
     'OANDA:XAUUSD',
   );
   const [chartOpen, setChartOpen] = useState(true);
+  const [autoSync, setAutoSync] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (!autoSync || !marketApiKey) return;
+    const timer = window.setInterval(() => {
+      void refreshMarketPrices();
+    }, 30000);
+    return () => window.clearInterval(timer);
+  }, [autoSync, marketApiKey]);
 
   useEffect(() => {
     loadPortfolio()
@@ -253,6 +262,7 @@ export default function Home() {
     window.localStorage.removeItem(MARKET_UPDATED_AT_STORAGE);
     setMarketApiKey('');
     setMarketUpdatedAt('');
+    setAutoSync(false);
     setMarketOpen(false);
     setNotice('ลบ API key แล้ว ราคาที่บันทึกในพอร์ตยังคงเดิม');
   };
@@ -396,6 +406,26 @@ export default function Home() {
                   : 'แก้ราคาเองหรือเชื่อมราคาตลาด'}
               </span>
             </div>
+            {marketApiKey ? (
+              <Button
+                size="sm"
+                variant={autoSync ? 'default' : 'outline'}
+                className={
+                  autoSync
+                    ? 'bg-emerald-600 hover:bg-emerald-700 text-white'
+                    : 'text-muted-foreground'
+                }
+                onClick={() => setAutoSync(!autoSync)}
+                title="ดึงราคาอัตโนมัติทุก 30 วินาทีเพื่อคำนวณ Realtime"
+              >
+                <span
+                  className={`inline-block size-2 rounded-full mr-1.5 ${
+                    autoSync ? 'bg-white animate-pulse' : 'bg-emerald-500'
+                  }`}
+                />
+                {autoSync ? 'Auto (30s)' : 'เปิด Auto'}
+              </Button>
+            ) : null}
             <Button
               size="sm"
               variant="outline"
@@ -1454,13 +1484,13 @@ function MarketPriceDialog({
           </DialogDescription>
         </DialogHeader>
         <form onSubmit={submit} className="grid gap-4">
-          <Field label="Twelve Data API key">
+          <Field label="Twelve Data API key หรือ Cloudflare Proxy URL">
             <Input
               type="password"
               autoComplete="off"
               value={apiKey}
               onChange={(event) => setApiKey(event.target.value)}
-              placeholder="ใส่ API key ของคุณ"
+              placeholder="ใส่ API key หรือ URL เช่น https://..."
             />
           </Field>
           <div className="grid gap-2 rounded-lg bg-sky-50 px-3 py-3 text-xs leading-5 text-sky-950">
@@ -1468,9 +1498,11 @@ function MarketPriceDialog({
               <strong>แหล่งราคา:</strong> XAU/USD และ WTI/USD Commodity Aggregate
             </p>
             <p>
-              API key เก็บเฉพาะในเบราว์เซอร์เครื่องนี้ ไม่ถูกใส่ใน GitHub หรือไฟล์สำรองพอร์ต
+              <strong>ความปลอดภัย:</strong> บันทึกเฉพาะในเบราว์เซอร์เครื่องนี้ (localStorage) ไม่ถูกส่งขึ้น GitHub
             </p>
-            <p>ระบบจะดึงราคาเมื่อกดอัปเดตเท่านั้น เพื่อไม่ใช้ API credits โดยไม่จำเป็น</p>
+            <p>
+              <strong>คำแนะนำ:</strong> สามารถใส่ Twelve Data API key ตรงๆ หรือใส่ Cloudflare Worker Proxy URL เพื่อซ่อน Key 100%
+            </p>
           </div>
           <div className="rounded-lg bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">
             ราคานี้เป็นราคาอ้างอิง spot ไม่ใช่ Bid/Ask ของ XM และไม่ได้รวม spread

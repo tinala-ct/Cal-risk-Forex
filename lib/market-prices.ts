@@ -20,11 +20,33 @@ type PriceResponse = {
 };
 
 export async function fetchCurrentMarketPrices(
-  apiKey: string,
+  apiKeyOrUrl: string,
   fetcher: typeof fetch = fetch,
 ): Promise<MarketPriceSnapshot> {
-  const normalizedKey = apiKey.trim();
-  if (!normalizedKey) throw new Error('กรุณากรอก Twelve Data API key');
+  const normalized = apiKeyOrUrl.trim();
+  if (!normalized) throw new Error('กรุณากรอก Twelve Data API key หรือ Proxy URL');
+
+  // หากเป็น URL (เช่น Cloudflare Worker / Serverless Proxy)
+  if (normalized.startsWith('http://') || normalized.startsWith('https://')) {
+    const response = await fetcher(normalized);
+    const payload = (await response.json()) as {
+      prices?: Record<SymbolCode, number>;
+      fetchedAt?: string;
+      message?: string;
+      error?: string;
+    };
+
+    if (!response.ok || !payload.prices) {
+      throw new Error(
+        payload.message || payload.error || `ดึงราคาผ่าน Proxy ไม่สำเร็จ (HTTP ${response.status})`,
+      );
+    }
+
+    return {
+      prices: payload.prices,
+      fetchedAt: payload.fetchedAt || new Date().toISOString(),
+    };
+  }
 
   const entries = await Promise.all(
     (Object.entries(MARKET_DATA_SYMBOLS) as [SymbolCode, string][]).map(
@@ -34,7 +56,7 @@ export async function fetchCurrentMarketPrices(
         url.searchParams.set('dp', '5');
 
         const response = await fetcher(url, {
-          headers: { Authorization: `apikey ${normalizedKey}` },
+          headers: { Authorization: `apikey ${normalized}` },
         });
         const payload = (await response.json()) as PriceResponse;
         const price = Number(payload.price);
