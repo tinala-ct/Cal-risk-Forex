@@ -47,11 +47,14 @@ pnpm test:calc
 pnpm build
 ```
 
-## ส่งขึ้น GitHub ผ่าน GitHub Desktop
+## เปิดเป็น Web App ด้วย GitHub Pages
 
-1. เปิด GitHub Desktop แล้วเลือก **File → Add Local Repository**
-2. เลือกโฟลเดอร์โปรเจกต์นี้
-3. ตรวจรายการไฟล์ แล้ว commit ด้วยข้อความ เช่น `Initial RiskLedger app`
-4. กด **Publish repository** เพื่อสร้าง repository บน GitHub
+โปรเจกต์นี้ build เป็น Vite static site และมี GitHub Actions สำหรับเผยแพร่โฟลเดอร์ `dist` อัตโนมัติ
 
-> หมายเหตุ: การ publish repository เป็นการเก็บ source code บน GitHub ยังไม่ใช่ฐานข้อมูลออนไลน์ข้ามอุปกรณ์ ถ้าต้องการใช้หลายเครื่องหรือหลายผู้ใช้ ควรเพิ่มระบบ sign-in และฐานข้อมูล server ในเวอร์ชันถัดไป
+1. Commit และ Push การแก้ไขเข้า branch `main` ผ่าน GitHub Desktop
+2. เปิด repository บน GitHub แล้วไปที่ **Settings → Pages**
+3. ที่ **Build and deployment → Source** เลือก **GitHub Actions**
+4. เปิดแท็บ **Actions** รอ workflow `Deploy GitHub Pages` สำเร็จ
+5. เข้าเว็บที่ `https://tinala-ct.github.io/Cal-risk-Forex/`
+
+> GitHub Pages และ repository นี้เป็น Public ข้อมูลตั้งต้นที่อยู่ใน source code จึงมองเห็นได้สาธารณะ ส่วนข้อมูลใหม่ที่เพิ่มผ่านหน้าเว็บจะอยู่ใน IndexedDB ของ browser เครื่องนั้น ควรส่งออก JSON สำรองเป็นระยะ
