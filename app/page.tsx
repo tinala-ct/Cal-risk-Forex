@@ -160,12 +160,13 @@ export default function Home() {
   const fileInput = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    if (!autoSync || !marketApiKey) return;
+    if (!autoSync) return;
+    void refreshMarketPrices();
     const timer = window.setInterval(() => {
       void refreshMarketPrices();
-    }, 30000);
+    }, 15000);
     return () => window.clearInterval(timer);
-  }, [autoSync, marketApiKey]);
+  }, [autoSync]);
 
   // โหลดข้อมูลพอร์ตจาก IndexedDB ในเครื่องก่อน
   useEffect(() => {
@@ -308,22 +309,24 @@ export default function Home() {
   };
 
   const refreshMarketPrices = async (apiKey = marketApiKey) => {
-    if (!apiKey.trim()) {
-      setMarketOpen(true);
-      return false;
-    }
-
     setMarketStatus('loading');
     try {
-      const snapshot = await fetchCurrentMarketPrices(apiKey);
+      const snapshot = await fetchCurrentMarketPrices(
+        apiKey,
+        fetch,
+        state.currentPrices,
+      );
       setState((current) => ({
         ...current,
-        currentPrices: snapshot.prices,
+        currentPrices: {
+          ...current.currentPrices,
+          ...snapshot.prices,
+        },
         updatedAt: snapshot.fetchedAt,
       }));
       setMarketUpdatedAt(snapshot.fetchedAt);
       window.localStorage.setItem(MARKET_UPDATED_AT_STORAGE, snapshot.fetchedAt);
-      setNotice('นำราคา XAU/USD และ WTI/USD มาใช้คำนวณแล้ว');
+      setNotice('อัปเดตราคาตลาดโลก (XAU/USD Realtime) เรียบร้อยแล้ว');
       return true;
     } catch (error) {
       setNotice(
@@ -545,29 +548,31 @@ export default function Home() {
               <span className="mt-0.5 block">
                 {marketUpdatedAt
                   ? `ดึงล่าสุด ${dateTime(marketUpdatedAt)}`
-                  : 'แก้ราคาเองหรือเชื่อมราคาตลาด'}
+                  : 'กด "ดึงราคาตลาดสด" หรือกรอกราคาเอง'}
               </span>
             </div>
-            {marketApiKey ? (
-              <Button
-                size="sm"
-                variant={autoSync ? 'default' : 'outline'}
-                className={
-                  autoSync
-                    ? 'bg-emerald-600 hover:bg-emerald-700 text-white'
-                    : 'text-muted-foreground'
-                }
-                onClick={() => setAutoSync(!autoSync)}
-                title="ดึงราคาอัตโนมัติทุก 30 วินาทีเพื่อคำนวณ Realtime"
-              >
-                <span
-                  className={`inline-block size-2 rounded-full mr-1.5 ${
-                    autoSync ? 'bg-white animate-pulse' : 'bg-emerald-500'
-                  }`}
-                />
-                {autoSync ? 'Auto (30s)' : 'เปิด Auto'}
-              </Button>
-            ) : null}
+            <Button
+              size="sm"
+              variant={autoSync ? 'default' : 'outline'}
+              className={
+                autoSync
+                  ? 'bg-emerald-600 hover:bg-emerald-700 text-white shadow-sm'
+                  : 'text-muted-foreground'
+              }
+              onClick={() => {
+                const next = !autoSync;
+                setAutoSync(next);
+                if (next) void refreshMarketPrices();
+              }}
+              title="ดึงราคา Realtime อัตโนมัติทุก 15 วินาที"
+            >
+              <span
+                className={`inline-block size-2 rounded-full mr-1.5 ${
+                  autoSync ? 'bg-white animate-pulse' : 'bg-emerald-500'
+                }`}
+              />
+              {autoSync ? 'Auto (15s)' : 'เปิด Auto'}
+            </Button>
             <Button
               size="sm"
               variant="outline"
@@ -577,7 +582,7 @@ export default function Home() {
               <RefreshCw
                 className={marketStatus === 'loading' ? 'animate-spin' : ''}
               />
-              {marketApiKey ? 'อัปเดตราคา' : 'เชื่อมราคา'}
+              ดึงราคาตลาดสด
             </Button>
             <Button
               size="icon-sm"
