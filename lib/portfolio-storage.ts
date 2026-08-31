@@ -1,4 +1,8 @@
-import { createDefaultState, type PortfolioState } from './portfolio';
+import {
+  createDefaultState,
+  normalizePortfolioState,
+  type PortfolioState,
+} from './portfolio';
 
 const DATABASE_NAME = 'riskledger-portfolio';
 const STORE_NAME = 'state';
@@ -23,7 +27,12 @@ export async function loadPortfolio() {
   return new Promise<PortfolioState>((resolve, reject) => {
     const transaction = database.transaction(STORE_NAME, 'readonly');
     const request = transaction.objectStore(STORE_NAME).get(STATE_KEY);
-    request.onsuccess = () => resolve(request.result ?? createDefaultState());
+    request.onsuccess = () =>
+      resolve(
+        request.result
+          ? normalizePortfolioState(request.result as PortfolioState)
+          : createDefaultState(),
+      );
     request.onerror = () => reject(request.error);
     transaction.oncomplete = () => database.close();
   });

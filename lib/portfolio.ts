@@ -62,8 +62,29 @@ export type PositionSummary = {
   unrealizedPnl: number;
 };
 
+// Fixed to the workbook and the XM instruments used by this portfolio.
+// GOLD on an Ultra Low Micro account is 1 oz per lot. The workbook's Oil
+// position is OIL/OILCash (100 barrels per lot), not the OILMn mini contract.
+export const LIQUIDATION_EQUITY = 0;
+export const FIXED_INSTRUMENTS: Record<SymbolCode, InstrumentConfig> = {
+  XAUUSD: {
+    symbol: 'XAUUSD',
+    label: 'XM GOLD Ultra Low Micro',
+    contractSize: 1,
+    priceDecimals: 2,
+  },
+  USOIL: {
+    symbol: 'USOIL',
+    label: 'XM OIL / OILCash',
+    contractSize: 100,
+    priceDecimals: 2,
+  },
+};
+
 const sideSign = (side: Side) => (side === 'BUY' ? 1 : -1);
 const positiveLots = (lots: number) => (lots > 1e-9 ? lots : 0);
+export const getContractSize = (symbol: SymbolCode) =>
+  FIXED_INSTRUMENTS[symbol].contractSize;
 
 export function calculateOrderUnrealized(
   order: Order,
@@ -112,7 +133,7 @@ export function getPositionSummaries(state: PortfolioState): PositionSummary[] {
         0,
       ) / lots;
     const currentPrice = state.currentPrices[symbol];
-    const contractSize = state.instruments[symbol].contractSize;
+    const contractSize = getContractSize(symbol);
     const unrealizedPnl = orders.reduce(
       (total, order) =>
         total + calculateOrderUnrealized(order, currentPrice, contractSize),
@@ -140,13 +161,13 @@ export function getAccountBalance(state: PortfolioState) {
 
 export function getUnrealizedPnl(state: PortfolioState) {
   return getOpenOrders(state).reduce((total, order) => {
-    const instrument = state.instruments[order.symbol];
+    const contractSize = getContractSize(order.symbol);
     return (
       total +
       calculateOrderUnrealized(
         order,
         state.currentPrices[order.symbol],
-        instrument.contractSize,
+        contractSize,
       )
     );
   }, 0);
@@ -156,7 +177,43 @@ export function getEquity(state: PortfolioState) {
   return getAccountBalance(state) + getUnrealizedPnl(state);
 }
 
-export function getCriticalPrice(
+export function getStandaloneLiquidationPrice(
+  state: PortfolioState,
+  targetSymbol: SymbolCode,
+  side: Side,
+) {
+  const position = getPositionSummaries(state).find(
+    (item) => item.symbol === targetSymbol && item.side === side,
+  );
+
+  if (!position) {
+    return {
+      kind: 'NO_EXPOSURE' as const,
+      price: null,
+      lots: 0,
+      averageEntry: null,
+    };
+  }
+
+  // This is the workbook's original model, expressed as the actual price:
+  // BUY  = average entry - balance / (lots * contract size)
+  // SELL = average entry + balance / (lots * contract size)
+  // It intentionally treats each position independently and does not deduct
+  // unrealized P/L from the other instrument.
+  const price =
+    position.averageEntry -
+    (sideSign(side) * getAccountBalance(state)) /
+      (position.lots * getContractSize(targetSymbol));
+
+  return {
+    kind: price < 0 ? ('BELOW_ZERO' as const) : ('PRICE' as const),
+    price,
+    lots: position.lots,
+    averageEntry: position.averageEntry,
+  };
+}
+
+export function getSharedPortfolioLiquidationPrice(
   state: PortfolioState,
   targetSymbol: SymbolCode,
 ) {
@@ -166,9 +223,8 @@ export function getCriticalPrice(
   let otherPnl = 0;
 
   for (const order of getOpenOrders(state)) {
-    const instrument = state.instruments[order.symbol];
     const signedExposure =
-      sideSign(order.side) * order.openLots * instrument.contractSize;
+      sideSign(order.side) * order.openLots * getContractSize(order.symbol);
     if (order.symbol === targetSymbol) {
       targetExposure += signedExposure;
       targetEntryValue += signedExposure * order.entryPrice;
@@ -176,7 +232,7 @@ export function getCriticalPrice(
       otherPnl += calculateOrderUnrealized(
         order,
         state.currentPrices[order.symbol],
-        instrument.contractSize,
+        getContractSize(order.symbol),
       );
     }
   }
@@ -191,7 +247,7 @@ export function getCriticalPrice(
   }
 
   const price =
-    (state.stopOutEquity - balance - otherPnl + targetEntryValue) /
+    (LIQUIDATION_EQUITY - balance - otherPnl + targetEntryValue) /
     targetExposure;
   return {
     kind: price < 0 ? ('BELOW_ZERO' as const) : ('PRICE' as const),
@@ -218,13 +274,13 @@ export function closeOrder(
   }
   if (input.exitPrice <= 0) throw new Error('ราคาปิดต้องมากกว่า 0');
 
-  const instrument = state.instruments[order.symbol];
+  const contractSize = getContractSize(order.symbol);
   const realizedPnl = calculateClosePnl(
     order.side,
     order.entryPrice,
     input.exitPrice,
     input.lots,
-    instrument.contractSize,
+    contractSize,
   );
   const nextOpenLots = positiveLots(order.openLots - input.lots);
 
@@ -242,7 +298,7 @@ export function closeOrder(
         lots: input.lots,
         entryPrice: order.entryPrice,
         exitPrice: input.exitPrice,
-        contractSize: instrument.contractSize,
+        contractSize,
         realizedPnl,
         closedAt: input.closedAt,
         note: input.note,
@@ -268,6 +324,19 @@ export function isPortfolioState(value: unknown): value is PortfolioState {
     Boolean(state.instruments?.XAUUSD) &&
     Boolean(state.instruments?.USOIL)
   );
+}
+
+export function normalizePortfolioState(state: PortfolioState): PortfolioState {
+  return {
+    ...state,
+    // Keep all journal data, but repair calculation settings that older app
+    // versions allowed users/imports to alter.
+    stopOutEquity: LIQUIDATION_EQUITY,
+    instruments: {
+      XAUUSD: { ...FIXED_INSTRUMENTS.XAUUSD },
+      USOIL: { ...FIXED_INSTRUMENTS.USOIL },
+    },
+  };
 }
 
 const xauPrices = [
@@ -311,21 +380,11 @@ export function createDefaultState(): PortfolioState {
   return {
     version: 1,
     initialBalance: 4300,
-    stopOutEquity: 0,
+    stopOutEquity: LIQUIDATION_EQUITY,
     currentPrices: { XAUUSD: 3300, USOIL: 60 },
     instruments: {
-      XAUUSD: {
-        symbol: 'XAUUSD',
-        label: 'Gold / U.S. Dollar',
-        contractSize: 1,
-        priceDecimals: 2,
-      },
-      USOIL: {
-        symbol: 'USOIL',
-        label: 'WTI Crude Oil',
-        contractSize: 100,
-        priceDecimals: 2,
-      },
+      XAUUSD: { ...FIXED_INSTRUMENTS.XAUUSD },
+      USOIL: { ...FIXED_INSTRUMENTS.USOIL },
     },
     orders: [...xau, ...oil],
     closes: [],

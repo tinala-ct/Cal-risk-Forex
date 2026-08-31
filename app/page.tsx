@@ -56,13 +56,17 @@ import {
   closeOrder,
   createDefaultState,
   getAccountBalance,
-  getCriticalPrice,
+  getContractSize,
   getEquity,
   getOpenOrders,
   getPositionSummaries,
   getRealizedPnl,
+  getSharedPortfolioLiquidationPrice,
+  getStandaloneLiquidationPrice,
   getUnrealizedPnl,
   isPortfolioState,
+  LIQUIDATION_EQUITY,
+  normalizePortfolioState,
   type CashFlow,
   type Order,
   type PortfolioState,
@@ -146,8 +150,26 @@ export default function Home() {
   const unrealizedPnl = useMemo(() => getUnrealizedPnl(state), [state]);
   const realizedPnl = useMemo(() => getRealizedPnl(state), [state]);
   const equity = useMemo(() => getEquity(state), [state]);
-  const xauCritical = useMemo(() => getCriticalPrice(state, 'XAUUSD'), [state]);
-  const oilCritical = useMemo(() => getCriticalPrice(state, 'USOIL'), [state]);
+  const standaloneLiquidations = useMemo(
+    () =>
+      summaries.map((position) => ({
+        position,
+        result: getStandaloneLiquidationPrice(
+          state,
+          position.symbol,
+          position.side,
+        ),
+      })),
+    [state, summaries],
+  );
+  const xauSharedCritical = useMemo(
+    () => getSharedPortfolioLiquidationPrice(state, 'XAUUSD'),
+    [state],
+  );
+  const oilSharedCritical = useMemo(
+    () => getSharedPortfolioLiquidationPrice(state, 'USOIL'),
+    [state],
+  );
   const totalLots = openOrders.reduce((total, order) => total + order.openLots, 0);
 
   const updatePrice = (symbol: SymbolCode, value: string) => {
@@ -176,7 +198,12 @@ export default function Home() {
     try {
       const parsed = JSON.parse(await file.text()) as unknown;
       if (!isPortfolioState(parsed)) throw new Error('invalid');
-      setState({ ...parsed, updatedAt: new Date().toISOString() });
+      setState(
+        normalizePortfolioState({
+          ...parsed,
+          updatedAt: new Date().toISOString(),
+        }),
+      );
       setNotice('นำเข้าข้อมูลสำรองเรียบร้อย');
     } catch {
       setNotice('ไฟล์สำรองไม่ถูกต้อง จึงไม่ได้เปลี่ยนข้อมูลเดิม');
@@ -228,7 +255,7 @@ export default function Home() {
 
         <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
           <MetricCard icon={<WalletCards />} label="Balance หลังปิดออเดอร์" value={money(accountBalance)} note={`Realized P/L ${signedMoney(realizedPnl)}`} />
-          <MetricCard icon={<CircleDollarSign />} label="Equity ปัจจุบัน" value={money(equity)} note={`Stop-out ที่ ${money(state.stopOutEquity)}`} positive={equity >= state.stopOutEquity} danger={equity < state.stopOutEquity} />
+          <MetricCard icon={<CircleDollarSign />} label="Equity ปัจจุบัน" value={money(equity)} note="สูตร Excel ถือว่าทุนหมดเมื่อ Equity = $0" positive={equity >= LIQUIDATION_EQUITY} danger={equity < LIQUIDATION_EQUITY} />
           <MetricCard icon={unrealizedPnl >= 0 ? <ArrowUpRight /> : <ArrowDownRight />} label="Unrealized P/L" value={signedMoney(unrealizedPnl)} note="รวม XAUUSD และ USOIL" positive={unrealizedPnl >= 0} danger={unrealizedPnl < 0} />
           <MetricCard icon={<Landmark />} label="รายการที่เปิด" value={`${openOrders.length} orders`} note={`${number(totalLots, 2)} lots รวมทุกสินทรัพย์`} />
         </section>
@@ -272,16 +299,29 @@ export default function Home() {
 
           <Card className="risk-card border-0 text-white shadow-[0_22px_60px_-34px_rgb(8_47_73/0.75)]">
             <CardHeader>
-              <CardTitle className="text-white">จุดวิกฤตแบบทุนร่วม</CardTitle>
-              <CardDescription className="text-sky-100/75">ราคาที่ทำให้ Equity เท่ากับ {money(state.stopOutEquity)} โดยตรึงอีกสินทรัพย์ไว้ ณ ราคาปัจจุบัน</CardDescription>
+              <CardTitle className="text-white">ราคาล้างตามสูตร Excel</CardTitle>
+              <CardDescription className="text-sky-100/75">ใช้ Balance เต็มจำนวนคำนวณแต่ละ Position แยกจากกัน โดยไม่หัก P/L ของอีกสินทรัพย์</CardDescription>
             </CardHeader>
             <CardContent className="space-y-3">
-              <CriticalBlock symbol="XAUUSD" result={xauCritical} otherLabel={`ตรึง Oil ที่ ${money(state.currentPrices.USOIL)}`} />
-              <CriticalBlock symbol="USOIL" result={oilCritical} otherLabel={`ตรึง XAU ที่ ${money(state.currentPrices.XAUUSD)}`} />
-              <p className="pt-1 text-xs leading-5 text-sky-100/65">เป็นแบบจำลอง Equity ไม่รวม margin requirement, spread, swap และ stop-out % ของโบรกเกอร์</p>
+              {standaloneLiquidations.length ? standaloneLiquidations.map(({ position, result }) => (
+                <StandaloneLiquidationBlock key={`${position.symbol}-${position.side}`} symbol={position.symbol} side={position.side} result={result} />
+              )) : <p className="py-5 text-center text-sm text-sky-100/70">ยังไม่มี Position ที่เปิดอยู่</p>}
+              <p className="pt-1 text-xs leading-5 text-sky-100/65">ค่าคงที่: GOLD Ultra Low Micro ×1 oz และ OIL/OILCash ×100 barrels — ไม่สามารถแก้ได้จากหน้าเว็บ</p>
             </CardContent>
           </Card>
         </section>
+
+        <Card className="mt-4 border-dashed bg-card/65 shadow-none">
+          <CardHeader>
+            <CardTitle>แบบจำลองทุนร่วม XAU + Oil (ส่วนเสริม)</CardTitle>
+            <CardDescription>คำนวณราคาของสินทรัพย์หนึ่งที่ทำให้ Equity รวมเป็น $0 โดยตรึงราคาอีกสินทรัพย์ไว้ ณ ราคาปัจจุบัน ผลส่วนนี้ไม่ได้นำไปแทนสูตรหลักจาก Excel</CardDescription>
+          </CardHeader>
+          <CardContent className="grid gap-3 md:grid-cols-2">
+            <SharedCriticalBlock symbol="XAUUSD" result={xauSharedCritical} otherLabel={`ตรึง Oil ที่ ${money(state.currentPrices.USOIL)}`} />
+            <SharedCriticalBlock symbol="USOIL" result={oilSharedCritical} otherLabel={`ตรึง XAU ที่ ${money(state.currentPrices.XAUUSD)}`} />
+            <p className="text-xs leading-5 text-muted-foreground md:col-span-2">เป็นแบบจำลอง Equity เท่านั้น ไม่รวม used margin, spread, swap และระดับ Stop-out จริงของโบรกเกอร์</p>
+          </CardContent>
+        </Card>
 
         <section className="mt-4 grid gap-4 2xl:grid-cols-[minmax(0,1.5fr)_minmax(420px,0.9fr)]">
           <Card className="border-0 shadow-[0_18px_55px_-42px_rgb(15_23_42/0.55)]">
@@ -305,7 +345,7 @@ export default function Home() {
                   </TableHeader>
                   <TableBody>
                     {openOrders.map((order) => {
-                      const pnl = calculateOrderUnrealized(order, state.currentPrices[order.symbol], state.instruments[order.symbol].contractSize);
+                      const pnl = calculateOrderUnrealized(order, state.currentPrices[order.symbol], getContractSize(order.symbol));
                       return (
                         <TableRow key={order.id}>
                           <TableCell className="pl-4 text-xs text-muted-foreground">{dateTime(order.openedAt)}</TableCell>
@@ -365,11 +405,6 @@ export default function Home() {
         setState((current) => ({
           ...current,
           initialBalance: settings.initialBalance,
-          stopOutEquity: settings.stopOutEquity,
-          instruments: {
-            XAUUSD: { ...current.instruments.XAUUSD, contractSize: settings.xauContractSize },
-            USOIL: { ...current.instruments.USOIL, contractSize: settings.oilContractSize },
-          },
           updatedAt: new Date().toISOString(),
         }));
         setSettingsOpen(false);
@@ -406,17 +441,32 @@ function SideBadge({ side }: { side: Side }) {
   return side === 'BUY' ? <Badge className="bg-sky-100 text-sky-800">BUY</Badge> : <Badge className="bg-orange-100 text-orange-800">SELL</Badge>;
 }
 
-function CriticalBlock({ symbol, result, otherLabel }: { symbol: SymbolCode; result: ReturnType<typeof getCriticalPrice>; otherLabel: string }) {
+function StandaloneLiquidationBlock({ symbol, side, result }: { symbol: SymbolCode; side: Side; result: ReturnType<typeof getStandaloneLiquidationPrice> }) {
+  const description = result.kind === 'NO_EXPOSURE'
+    ? 'ไม่มี Position'
+    : result.kind === 'BELOW_ZERO'
+      ? 'ไม่ล้างเหนือ $0'
+      : money(result.price ?? 0);
+  return (
+    <div className="rounded-lg border border-white/10 bg-white/8 p-4">
+      <div className="flex items-center justify-between gap-3 text-xs text-sky-100/70"><span>คิดแยกตามสูตรเดิม</span><ShieldAlert className="size-4 shrink-0" /></div>
+      <div className="mt-2 flex items-baseline justify-between gap-3"><span className="flex items-center gap-2 font-semibold text-sky-100">{displaySymbol(symbol)} <SideBadge side={side} /></span><p className="text-right font-mono text-xl font-semibold">{description}</p></div>
+      {result.kind === 'BELOW_ZERO' && <p className="mt-2 text-right text-[11px] text-sky-100/55">ราคาที่สูตรคำนวณได้ {money(result.price ?? 0)}</p>}
+    </div>
+  );
+}
+
+function SharedCriticalBlock({ symbol, result, otherLabel }: { symbol: SymbolCode; result: ReturnType<typeof getSharedPortfolioLiquidationPrice>; otherLabel: string }) {
   const description = result.kind === 'NO_EXPOSURE'
     ? 'ไม่มี Net exposure'
     : result.kind === 'BELOW_ZERO'
       ? 'ไม่มีจุดวิกฤตเหนือ $0'
       : money(result.price ?? 0);
   return (
-    <div className="rounded-lg border border-white/10 bg-white/8 p-4">
-      <div className="flex items-center justify-between gap-3 text-xs text-sky-100/70"><span>{otherLabel}</span><ShieldAlert className="size-4 shrink-0" /></div>
-      <div className="mt-2 flex items-baseline justify-between gap-3"><span className="font-semibold text-sky-100">{symbol}</span><p className="text-right font-mono text-xl font-semibold">{description}</p></div>
-      {result.kind === 'BELOW_ZERO' && <p className="mt-2 text-right text-[11px] text-sky-100/55">ค่าที่คำนวณได้ {money(result.price ?? 0)}</p>}
+    <div className="rounded-lg border bg-background/70 p-4">
+      <div className="flex items-center justify-between gap-3 text-xs text-muted-foreground"><span>{otherLabel}</span><ShieldAlert className="size-4 shrink-0" /></div>
+      <div className="mt-2 flex items-baseline justify-between gap-3"><span className="font-semibold">{displaySymbol(symbol)}</span><p className="text-right font-mono text-xl font-semibold">{description}</p></div>
+      {result.kind === 'BELOW_ZERO' && <p className="mt-2 text-right text-[11px] text-muted-foreground">ค่าที่คำนวณได้ {money(result.price ?? 0)}</p>}
     </div>
   );
 }
@@ -467,7 +517,7 @@ function AddOrderDialog({ open, onOpenChange, onSubmit }: { open: boolean; onOpe
         <DialogHeader><DialogTitle>เพิ่มออเดอร์ใหม่</DialogTitle><DialogDescription>รายการจะถูกเพิ่มในพอร์ตและบันทึกอัตโนมัติ</DialogDescription></DialogHeader>
         <form onSubmit={submit} className="grid gap-4">
           <div className="grid gap-3 sm:grid-cols-2">
-            <Field label="สินทรัพย์"><NativeSelect className="w-full" value={symbol} onChange={(event) => setSymbol(event.target.value as SymbolCode)}><NativeSelectOption value="XAUUSD">XAUUSD — Gold</NativeSelectOption><NativeSelectOption value="USOIL">USOIL — WTI Oil</NativeSelectOption></NativeSelect></Field>
+            <Field label="สินทรัพย์"><NativeSelect className="w-full" value={symbol} onChange={(event) => setSymbol(event.target.value as SymbolCode)}><NativeSelectOption value="XAUUSD">GOLD micro — XAUUSD ×1</NativeSelectOption><NativeSelectOption value="USOIL">OIL / OILCash — WTI ×100</NativeSelectOption></NativeSelect></Field>
             <Field label="ฝั่ง"><NativeSelect className="w-full" value={side} onChange={(event) => setSide(event.target.value as Side)}><NativeSelectOption value="BUY">BUY — ซื้อ</NativeSelectOption><NativeSelectOption value="SELL">SELL — ขาย</NativeSelectOption></NativeSelect></Field>
             <Field label="ราคาเข้า (USD)"><Input type="number" min="0" step="0.01" inputMode="decimal" value={price} onChange={(event) => setPrice(event.target.value)} placeholder="0.00" /></Field>
             <Field label="Lot"><Input type="number" min="0" step="0.01" inputMode="decimal" value={lots} onChange={(event) => setLots(event.target.value)} /></Field>
@@ -489,7 +539,7 @@ function CloseOrderDialog({ order, state, onOpenChange, onSubmit }: { order: Ord
   const [note, setNote] = useState('');
   const [error, setError] = useState('');
   const preview = Number(lots) > 0 && Number(exitPrice) > 0
-    ? (order.side === 'BUY' ? 1 : -1) * (Number(exitPrice) - order.entryPrice) * Number(lots) * state.instruments[order.symbol].contractSize
+    ? (order.side === 'BUY' ? 1 : -1) * (Number(exitPrice) - order.entryPrice) * Number(lots) * getContractSize(order.symbol)
     : 0;
   const submit = (event: React.SyntheticEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -535,19 +585,16 @@ function CashFlowDialog({ open, onOpenChange, onSubmit }: { open: boolean; onOpe
   );
 }
 
-function SettingsDialog({ open, onOpenChange, state, onSubmit }: { open: boolean; onOpenChange: (open: boolean) => void; state: PortfolioState; onSubmit: (settings: { initialBalance: number; stopOutEquity: number; xauContractSize: number; oilContractSize: number }) => void }) {
+function SettingsDialog({ open, onOpenChange, state, onSubmit }: { open: boolean; onOpenChange: (open: boolean) => void; state: PortfolioState; onSubmit: (settings: { initialBalance: number }) => void }) {
   const [initialBalance, setInitialBalance] = useState(String(state.initialBalance));
-  const [stopOutEquity, setStopOutEquity] = useState(String(state.stopOutEquity));
-  const [xauContractSize, setXauContractSize] = useState(String(state.instruments.XAUUSD.contractSize));
-  const [oilContractSize, setOilContractSize] = useState(String(state.instruments.USOIL.contractSize));
   const submit = (event: React.SyntheticEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const values = { initialBalance: Number(initialBalance), stopOutEquity: Number(stopOutEquity), xauContractSize: Number(xauContractSize), oilContractSize: Number(oilContractSize) };
-    if (!Number.isFinite(values.initialBalance) || values.stopOutEquity < 0 || values.xauContractSize <= 0 || values.oilContractSize <= 0) return;
+    const values = { initialBalance: Number(initialBalance) };
+    if (!Number.isFinite(values.initialBalance) || values.initialBalance < 0) return;
     onSubmit(values);
   };
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}><DialogContent className="sm:max-w-lg"><DialogHeader><DialogTitle>ตั้งค่าการคำนวณ</DialogTitle><DialogDescription>ค่าเริ่มต้นตรงกับไฟล์ Excel: XAU ×1 และ Oil ×100</DialogDescription></DialogHeader><form onSubmit={submit} className="grid gap-4"><div className="grid gap-3 sm:grid-cols-2"><Field label="ทุนเริ่มต้น (USD)"><Input type="number" step="0.01" value={initialBalance} onChange={(event) => setInitialBalance(event.target.value)} /></Field><Field label="Stop-out Equity (USD)"><Input type="number" min="0" step="0.01" value={stopOutEquity} onChange={(event) => setStopOutEquity(event.target.value)} /></Field><Field label="XAU contract size"><Input type="number" min="0" step="0.01" value={xauContractSize} onChange={(event) => setXauContractSize(event.target.value)} /></Field><Field label="Oil contract size"><Input type="number" min="0" step="0.01" value={oilContractSize} onChange={(event) => setOilContractSize(event.target.value)} /></Field></div><div className="rounded-lg bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">Contract size ของแต่ละโบรกเกอร์อาจต่างกัน การเปลี่ยนค่านี้จะคำนวณ P/L และจุดวิกฤตของทุกรายการใหม่ แต่ไม่แก้ประวัติ P/L ที่ปิดแล้ว</div><DialogFooter><Button type="button" variant="outline" onClick={() => onOpenChange(false)}>ยกเลิก</Button><Button type="submit">บันทึกการตั้งค่า</Button></DialogFooter></form></DialogContent></Dialog>
+    <Dialog open={open} onOpenChange={onOpenChange}><DialogContent className="sm:max-w-lg"><DialogHeader><DialogTitle>ตั้งค่าทุนตั้งต้น</DialogTitle><DialogDescription>สูตรและตัวคูณสัญญาถูกล็อกให้ตรงกับไฟล์ Excel</DialogDescription></DialogHeader><form onSubmit={submit} className="grid gap-4"><Field label="ทุนเริ่มต้น (USD)"><Input type="number" min="0" step="0.01" value={initialBalance} onChange={(event) => setInitialBalance(event.target.value)} /></Field><div className="grid gap-2 rounded-lg bg-sky-50 px-3 py-3 text-xs leading-5 text-sky-950"><p><strong>GOLD Ultra Low Micro:</strong> 1 lot = 1 oz → ตัวคูณ ×1</p><p><strong>OIL / OILCash:</strong> 1 lot = 100 barrels → ตัวคูณ ×100</p><p><strong>จุดล้างตาม Excel:</strong> Equity = $0</p></div><div className="rounded-lg bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">ห้ามใช้กับ OILMn ซึ่งเป็นสัญญา Mini และมีขนาดต่างจาก OIL/OILCash ในไฟล์นี้</div><DialogFooter><Button type="button" variant="outline" onClick={() => onOpenChange(false)}>ยกเลิก</Button><Button type="submit">บันทึกทุนตั้งต้น</Button></DialogFooter></form></DialogContent></Dialog>
   );
 }
 
@@ -558,4 +605,8 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 function signedMoney(value: number) {
   if (Math.abs(value) < 0.005) return money(0);
   return `${value > 0 ? '+' : '-'}${money(Math.abs(value))}`;
+}
+
+function displaySymbol(symbol: SymbolCode) {
+  return symbol === 'XAUUSD' ? 'XAUUSD / GOLD micro' : 'OIL / OILCash';
 }
