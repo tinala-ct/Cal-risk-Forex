@@ -36,6 +36,9 @@ jobs:
       - name: Verify calculations
         run: pnpm test:calc
 
+      - name: Verify market-price integration
+        run: pnpm test:market
+
       - name: Type-check
         run: pnpm exec tsc --noEmit
 

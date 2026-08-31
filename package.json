@@ -10,6 +10,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "test:calc": "node --experimental-strip-types scripts/verify-calculations.ts",
+    "test:market": "node --experimental-strip-types scripts/verify-market-prices.ts",
     "lint": "oxlint",
     "format": "oxfmt"
   },
