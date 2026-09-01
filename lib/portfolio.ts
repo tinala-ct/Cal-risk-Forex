@@ -31,18 +31,25 @@ export type CloseEvent = {
   realizedPnl: number;
   closedAt: string;
   note: string;
+  reversedAt?: string;
+  reversalNote?: string;
 };
 
 export type CashFlow = {
   id: string;
-  kind: 'DEPOSIT' | 'WITHDRAWAL';
+  kind: 'DEPOSIT' | 'WITHDRAWAL' | 'BALANCE_ADJUSTMENT';
   amount: number;
   occurredAt: string;
   note: string;
+  balanceBefore?: number;
+  balanceAfter?: number;
+  reversedAt?: string;
+  reversalNote?: string;
 };
 
 export type PortfolioState = {
-  version: 1;
+  version: 2;
+  revision: number;
   initialBalance: number;
   stopOutEquity: number;
   currentPrices: Record<SymbolCode, number>;
@@ -144,13 +151,21 @@ export function getPositionSummaries(state: PortfolioState): PositionSummary[] {
 }
 
 export function getRealizedPnl(state: PortfolioState) {
-  return state.closes.reduce((total, close) => total + close.realizedPnl, 0);
+  return state.closes.reduce(
+    (total, close) => total + (close.reversedAt ? 0 : close.realizedPnl),
+    0,
+  );
+}
+
+export function getCashFlowImpact(flow: CashFlow) {
+  if (flow.reversedAt) return 0;
+  if (flow.kind === 'BALANCE_ADJUSTMENT') return flow.amount;
+  return flow.kind === 'DEPOSIT' ? flow.amount : -flow.amount;
 }
 
 export function getCashFlowTotal(state: PortfolioState) {
   return state.cashFlows.reduce(
-    (total, flow) =>
-      total + (flow.kind === 'DEPOSIT' ? flow.amount : -flow.amount),
+    (total, flow) => total + getCashFlowImpact(flow),
     0,
   );
 }
@@ -273,6 +288,9 @@ export function closeOrder(
     throw new Error('จำนวน Lot ที่ปิดไม่ถูกต้อง');
   }
   if (input.exitPrice <= 0) throw new Error('ราคาปิดต้องมากกว่า 0');
+  if (!Number.isFinite(Date.parse(input.closedAt))) {
+    throw new Error('วันที่และเวลาปิดไม่ถูกต้อง');
+  }
 
   const contractSize = getContractSize(order.symbol);
   const realizedPnl = calculateClosePnl(
@@ -305,30 +323,364 @@ export function closeOrder(
       },
       ...state.closes,
     ],
+    revision: state.revision + 1,
     updatedAt: new Date().toISOString(),
   };
 }
 
-export function isPortfolioState(value: unknown): value is PortfolioState {
-  if (!value || typeof value !== 'object') return false;
-  const state = value as Partial<PortfolioState>;
+export function addCashFlow(state: PortfolioState, flow: CashFlow) {
+  if (!Number.isFinite(flow.amount) || Math.abs(flow.amount) <= 1e-9) {
+    throw new Error('จำนวนเงินต้องมากกว่า 0');
+  }
+  if (!Number.isFinite(Date.parse(flow.occurredAt))) {
+    throw new Error('วันที่และเวลารายการไม่ถูกต้อง');
+  }
+  if (
+    flow.kind !== 'BALANCE_ADJUSTMENT' &&
+    (!(flow.amount > 0) ||
+      flow.balanceBefore !== undefined ||
+      flow.balanceAfter !== undefined)
+  ) {
+    throw new Error('รูปแบบรายการฝาก/ถอนไม่ถูกต้อง');
+  }
+  if (
+    flow.kind === 'BALANCE_ADJUSTMENT' &&
+    (flow.balanceBefore === undefined ||
+      flow.balanceAfter === undefined ||
+      Math.abs(flow.balanceBefore - getAccountBalance(state)) > 0.011 ||
+      Math.abs(flow.balanceAfter - flow.balanceBefore - flow.amount) > 0.011)
+  ) {
+    throw new Error('รายการปรับ Balance ไม่ตรงกับ Balance ปัจจุบัน');
+  }
+  if (
+    flow.kind === 'WITHDRAWAL' &&
+    flow.amount - getAccountBalance(state) > 1e-9
+  ) {
+    throw new Error('ยอดถอนมากกว่า Balance ปัจจุบัน');
+  }
+
+  return touchPortfolioState({
+    ...state,
+    cashFlows: [flow, ...state.cashFlows],
+  });
+}
+
+export function createBalanceAdjustment(
+  state: PortfolioState,
+  targetBalance: number,
+  note: string,
+  occurredAt = new Date().toISOString(),
+): CashFlow | null {
+  if (!Number.isFinite(targetBalance) || targetBalance < 0) {
+    throw new Error('Balance ต้องเป็นตัวเลขตั้งแต่ 0 ขึ้นไป');
+  }
+  const balanceBefore = getAccountBalance(state);
+  const difference = Number((targetBalance - balanceBefore).toFixed(2));
+  if (Math.abs(difference) < 0.005) return null;
+  return {
+    id: crypto.randomUUID(),
+    kind: 'BALANCE_ADJUSTMENT',
+    amount: difference,
+    occurredAt,
+    note: note.trim() || `ปรับยอด Balance เป็น ${targetBalance.toFixed(2)} USD`,
+    balanceBefore: Number(balanceBefore.toFixed(2)),
+    balanceAfter: Number(targetBalance.toFixed(2)),
+  };
+}
+
+export function updateCashFlowNote(
+  state: PortfolioState,
+  flowId: string,
+  note: string,
+) {
+  if (!state.cashFlows.some((flow) => flow.id === flowId)) {
+    throw new Error('ไม่พบรายการเงินที่ต้องการแก้ไข');
+  }
+  return touchPortfolioState({
+    ...state,
+    cashFlows: state.cashFlows.map((flow) =>
+      flow.id === flowId ? { ...flow, note: note.trim() } : flow,
+    ),
+  });
+}
+
+export function updateCloseNote(
+  state: PortfolioState,
+  closeId: string,
+  note: string,
+) {
+  if (!state.closes.some((close) => close.id === closeId)) {
+    throw new Error('ไม่พบรายการปิดออเดอร์ที่ต้องการแก้ไข');
+  }
+  return touchPortfolioState({
+    ...state,
+    closes: state.closes.map((close) =>
+      close.id === closeId ? { ...close, note: note.trim() } : close,
+    ),
+  });
+}
+
+export function reverseCashFlow(
+  state: PortfolioState,
+  flowId: string,
+  reversalNote: string,
+) {
+  const flow = state.cashFlows.find((item) => item.id === flowId);
+  if (!flow) throw new Error('ไม่พบรายการเงินที่ต้องการย้อน');
+  if (flow.reversedAt) throw new Error('รายการนี้ถูกย้อนแล้ว');
+
+  const projectedBalance = getAccountBalance(state) - getCashFlowImpact(flow);
+  if (projectedBalance < -1e-9) {
+    throw new Error('ย้อนรายการนี้ไม่ได้ เพราะจะทำให้ Balance ติดลบ');
+  }
+
+  return touchPortfolioState({
+    ...state,
+    cashFlows: state.cashFlows.map((item) =>
+      item.id === flowId
+        ? {
+            ...item,
+            reversedAt: new Date().toISOString(),
+            reversalNote: reversalNote.trim() || 'ย้อนรายการที่บันทึกผิด',
+          }
+        : item,
+    ),
+  });
+}
+
+export function reverseClose(
+  state: PortfolioState,
+  closeId: string,
+  reversalNote: string,
+) {
+  const close = state.closes.find((item) => item.id === closeId);
+  if (!close) throw new Error('ไม่พบรายการปิดออเดอร์ที่ต้องการย้อน');
+  if (close.reversedAt) throw new Error('รายการนี้ถูกย้อนแล้ว');
+  const order = state.orders.find((item) => item.id === close.orderId);
+  if (!order) throw new Error('ไม่พบออเดอร์ต้นทางของรายการปิด');
+  if (order.openLots + close.lots - order.initialLots > 1e-9) {
+    throw new Error('ย้อนรายการไม่ได้ เพราะ Lot จะมากกว่า Lot เริ่มต้น');
+  }
+
+  return touchPortfolioState({
+    ...state,
+    orders: state.orders.map((item) =>
+      item.id === order.id
+        ? { ...item, openLots: positiveLots(item.openLots + close.lots) }
+        : item,
+    ),
+    closes: state.closes.map((item) =>
+      item.id === closeId
+        ? {
+            ...item,
+            reversedAt: new Date().toISOString(),
+            reversalNote: reversalNote.trim() || 'ย้อนรายการปิดที่บันทึกผิด',
+          }
+        : item,
+    ),
+  });
+}
+
+export function touchPortfolioState(
+  state: PortfolioState,
+  updatedAt = new Date().toISOString(),
+): PortfolioState {
+  return {
+    ...state,
+    version: 2,
+    revision: state.revision + 1,
+    updatedAt,
+  };
+}
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+const isFiniteNumber = (value: unknown): value is number =>
+  typeof value === 'number' && Number.isFinite(value);
+const isNonEmptyString = (value: unknown): value is string =>
+  typeof value === 'string' && value.trim().length > 0;
+const isString = (value: unknown): value is string => typeof value === 'string';
+const isTimestamp = (value: unknown): value is string =>
+  isNonEmptyString(value) && Number.isFinite(Date.parse(value));
+const isSymbol = (value: unknown): value is SymbolCode =>
+  value === 'XAUUSD' || value === 'USOIL';
+const isSide = (value: unknown): value is Side =>
+  value === 'BUY' || value === 'SELL';
+
+function isOrder(value: unknown): value is Order {
+  if (!isRecord(value)) return false;
   return (
-    state.version === 1 &&
-    typeof state.initialBalance === 'number' &&
-    typeof state.stopOutEquity === 'number' &&
-    Array.isArray(state.orders) &&
-    Array.isArray(state.closes) &&
-    Array.isArray(state.cashFlows) &&
-    Boolean(state.currentPrices?.XAUUSD) &&
-    Boolean(state.currentPrices?.USOIL) &&
-    Boolean(state.instruments?.XAUUSD) &&
-    Boolean(state.instruments?.USOIL)
+    isNonEmptyString(value.id) &&
+    isSymbol(value.symbol) &&
+    isSide(value.side) &&
+    isFiniteNumber(value.entryPrice) &&
+    value.entryPrice > 0 &&
+    isFiniteNumber(value.initialLots) &&
+    value.initialLots > 0 &&
+    isFiniteNumber(value.openLots) &&
+    value.openLots >= 0 &&
+    value.openLots <= value.initialLots + 1e-9 &&
+    isTimestamp(value.openedAt) &&
+    isString(value.note)
   );
+}
+
+function isClose(value: unknown): value is CloseEvent {
+  if (!isRecord(value)) return false;
+  return (
+    isNonEmptyString(value.id) &&
+    isNonEmptyString(value.orderId) &&
+    isSymbol(value.symbol) &&
+    isSide(value.side) &&
+    isFiniteNumber(value.lots) &&
+    value.lots > 0 &&
+    isFiniteNumber(value.entryPrice) &&
+    value.entryPrice > 0 &&
+    isFiniteNumber(value.exitPrice) &&
+    value.exitPrice > 0 &&
+    isFiniteNumber(value.contractSize) &&
+    value.contractSize === getContractSize(value.symbol) &&
+    isFiniteNumber(value.realizedPnl) &&
+    isTimestamp(value.closedAt) &&
+    isString(value.note) &&
+    (value.reversedAt === undefined || isTimestamp(value.reversedAt)) &&
+    (value.reversalNote === undefined || isString(value.reversalNote))
+  );
+}
+
+function isCashFlow(value: unknown): value is CashFlow {
+  if (!isRecord(value)) return false;
+  const kindIsValid =
+    value.kind === 'DEPOSIT' ||
+    value.kind === 'WITHDRAWAL' ||
+    value.kind === 'BALANCE_ADJUSTMENT';
+  const amountIsValid =
+    isFiniteNumber(value.amount) &&
+    (value.kind === 'BALANCE_ADJUSTMENT'
+      ? Math.abs(value.amount) > 1e-9
+      : value.amount > 0);
+  return (
+    isNonEmptyString(value.id) &&
+    kindIsValid &&
+    amountIsValid &&
+    isTimestamp(value.occurredAt) &&
+    isString(value.note) &&
+    (value.balanceBefore === undefined ||
+      (isFiniteNumber(value.balanceBefore) && value.balanceBefore >= 0)) &&
+    (value.balanceAfter === undefined ||
+      (isFiniteNumber(value.balanceAfter) && value.balanceAfter >= 0)) &&
+    (value.reversedAt === undefined || isTimestamp(value.reversedAt)) &&
+    (value.reversalNote === undefined || isString(value.reversalNote))
+  );
+}
+
+export function parsePortfolioState(value: unknown): PortfolioState {
+  if (!isRecord(value)) throw new Error('ข้อมูลพอร์ตต้องเป็น object');
+  if (value.version !== 1 && value.version !== 2) {
+    throw new Error('ไม่รองรับเวอร์ชันของไฟล์สำรอง');
+  }
+  if (!isFiniteNumber(value.initialBalance) || value.initialBalance < 0) {
+    throw new Error('ทุนตั้งต้นไม่ถูกต้อง');
+  }
+  if (!isFiniteNumber(value.stopOutEquity))
+    throw new Error('ค่า Equity ไม่ถูกต้อง');
+  if (!isRecord(value.currentPrices)) throw new Error('ราคาปัจจุบันไม่ถูกต้อง');
+  if (
+    !isFiniteNumber(value.currentPrices.XAUUSD) ||
+    value.currentPrices.XAUUSD <= 0 ||
+    !isFiniteNumber(value.currentPrices.USOIL) ||
+    value.currentPrices.USOIL <= 0
+  ) {
+    throw new Error('ราคาปัจจุบันต้องมากกว่า 0');
+  }
+  if (!Array.isArray(value.orders) || !value.orders.every(isOrder)) {
+    throw new Error('รายการออเดอร์ไม่ถูกต้อง');
+  }
+  if (!Array.isArray(value.closes) || !value.closes.every(isClose)) {
+    throw new Error('รายการปิดออเดอร์ไม่ถูกต้อง');
+  }
+  if (!Array.isArray(value.cashFlows) || !value.cashFlows.every(isCashFlow)) {
+    throw new Error('รายการฝากถอนหรือปรับยอดไม่ถูกต้อง');
+  }
+  if (!isTimestamp(value.updatedAt)) throw new Error('เวลาอัปเดตไม่ถูกต้อง');
+
+  const orderIds = new Set(value.orders.map((order) => order.id));
+  const closeIds = new Set(value.closes.map((close) => close.id));
+  const cashFlowIds = new Set(value.cashFlows.map((flow) => flow.id));
+  if (
+    orderIds.size !== value.orders.length ||
+    closeIds.size !== value.closes.length ||
+    cashFlowIds.size !== value.cashFlows.length
+  ) {
+    throw new Error('พบ ID รายการซ้ำในไฟล์ข้อมูล');
+  }
+  for (const close of value.closes) {
+    const order = value.orders.find((item) => item.id === close.orderId);
+    if (
+      !order ||
+      close.symbol !== order.symbol ||
+      close.side !== order.side ||
+      Math.abs(close.entryPrice - order.entryPrice) > 1e-9
+    ) {
+      throw new Error('รายการปิดไม่ตรงกับออเดอร์ต้นทาง');
+    }
+  }
+  for (const order of value.orders) {
+    const activeClosedLots = value.closes.reduce(
+      (total, close) =>
+        close.orderId === order.id && !close.reversedAt
+          ? total + close.lots
+          : total,
+      0,
+    );
+    if (
+      Math.abs(order.openLots + activeClosedLots - order.initialLots) > 1e-7
+    ) {
+      throw new Error('Lot คงเหลือไม่ตรงกับประวัติการปิด');
+    }
+  }
+  for (const flow of value.cashFlows) {
+    if (
+      flow.kind === 'BALANCE_ADJUSTMENT' &&
+      (flow.balanceBefore === undefined ||
+        flow.balanceAfter === undefined ||
+        Math.abs(flow.balanceAfter - flow.balanceBefore - flow.amount) > 0.011)
+    ) {
+      throw new Error('รายการปรับ Balance ไม่สอดคล้องกับยอดก่อนและหลัง');
+    }
+  }
+
+  const migrated: PortfolioState = {
+    version: 2,
+    revision:
+      value.version === 2 &&
+      isFiniteNumber(value.revision) &&
+      value.revision >= 0
+        ? Math.floor(value.revision)
+        : 0,
+    initialBalance: value.initialBalance,
+    stopOutEquity: value.stopOutEquity,
+    currentPrices: {
+      XAUUSD: value.currentPrices.XAUUSD,
+      USOIL: value.currentPrices.USOIL,
+    },
+    instruments: {
+      XAUUSD: { ...FIXED_INSTRUMENTS.XAUUSD },
+      USOIL: { ...FIXED_INSTRUMENTS.USOIL },
+    },
+    orders: value.orders,
+    closes: value.closes,
+    cashFlows: value.cashFlows,
+    updatedAt: value.updatedAt,
+  };
+  return normalizePortfolioState(migrated);
 }
 
 export function normalizePortfolioState(state: PortfolioState): PortfolioState {
   return {
     ...state,
+    version: 2,
+    revision: Number.isFinite(state.revision) ? Math.max(0, state.revision) : 0,
     // Keep all journal data, but repair calculation settings that older app
     // versions allowed users/imports to alter.
     stopOutEquity: LIQUIDATION_EQUITY,
@@ -340,9 +692,9 @@ export function normalizePortfolioState(state: PortfolioState): PortfolioState {
 }
 
 const xauPrices = [
-  5143.42, 5078.17, 5044.09, 5012.29, 4941.92, 4833.53, 4774.08,
-  4721.03, 4711.75, 4696.56, 4679.61, 4675.12, 4671.01, 4665.7,
-  4662.84, 4625.39, 4629.38,
+  5143.42, 5078.17, 5044.09, 5012.29, 4941.92, 4833.53, 4774.08, 4721.03,
+  4711.75, 4696.56, 4679.61, 4675.12, 4671.01, 4665.7, 4662.84, 4625.39,
+  4629.38,
 ];
 const oilOrders = [
   [107.3, 0.01],
@@ -378,7 +730,8 @@ export function createDefaultState(): PortfolioState {
   }));
 
   return {
-    version: 1,
+    version: 2,
+    revision: 0,
     initialBalance: 4300,
     stopOutEquity: LIQUIDATION_EQUITY,
     currentPrices: { XAUUSD: 3300, USOIL: 60 },

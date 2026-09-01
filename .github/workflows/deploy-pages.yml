@@ -39,6 +39,12 @@ jobs:
       - name: Verify market-price integration
         run: pnpm test:market
 
+      - name: Verify cloud conflict resolution
+        run: pnpm test:sync
+
+      - name: Lint application code
+        run: pnpm lint
+
       - name: Type-check
         run: pnpm exec tsc --noEmit
 

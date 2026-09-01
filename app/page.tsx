@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArchiveRestore,
   ArrowDownRight,
@@ -70,9 +70,12 @@ import {
 import { Textarea } from '@/components/ui/textarea';
 import {
   calculateOrderUnrealized,
+  addCashFlow,
   closeOrder,
+  createBalanceAdjustment,
   createDefaultState,
   getAccountBalance,
+  getCashFlowImpact,
   getContractSize,
   getEquity,
   getOpenOrders,
@@ -81,22 +84,36 @@ import {
   getSharedPortfolioLiquidationPrice,
   getStandaloneLiquidationPrice,
   getUnrealizedPnl,
-  isPortfolioState,
   LIQUIDATION_EQUITY,
-  normalizePortfolioState,
+  parsePortfolioState,
+  reverseCashFlow,
+  reverseClose,
+  touchPortfolioState,
+  updateCashFlowNote,
+  updateCloseNote,
   type CashFlow,
   type Order,
   type PortfolioState,
   type Side,
   type SymbolCode,
 } from '@/lib/portfolio';
-import { loadPortfolio, savePortfolio } from '@/lib/portfolio-storage';
+import {
+  loadLatestRecoverySnapshot,
+  loadPortfolio,
+  savePortfolio,
+  saveRecoverySnapshot,
+} from '@/lib/portfolio-storage';
+import {
+  comparePortfolioFreshness,
+  portfolioFingerprint,
+} from '@/lib/portfolio-sync';
 import {
   fetchCurrentMarketPrices,
   MARKET_DATA_PROVIDER,
 } from '@/lib/market-prices';
 
-const MARKET_API_KEY_STORAGE = 'riskledger-twelve-data-api-key';
+const MARKET_PROXY_STORAGE = 'riskledger-market-proxy-url';
+const LEGACY_MARKET_KEY_STORAGE = 'riskledger-twelve-data-api-key';
 const MARKET_UPDATED_AT_STORAGE = 'riskledger-market-updated-at';
 
 const nowForInput = () => {
@@ -138,10 +155,13 @@ export default function Home() {
   const [addOpen, setAddOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [cashOpen, setCashOpen] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
   const [marketOpen, setMarketOpen] = useState(false);
-  const [marketApiKey, setMarketApiKey] = useState(
-    () => window.localStorage.getItem(MARKET_API_KEY_STORAGE) ?? '',
-  );
+  const [marketProxyUrl, setMarketProxyUrl] = useState(() => {
+    const configured = window.localStorage.getItem(MARKET_PROXY_STORAGE) ?? '';
+    const legacy = window.localStorage.getItem(LEGACY_MARKET_KEY_STORAGE) ?? '';
+    return configured || (/^https?:\/\//.test(legacy) ? legacy : '');
+  });
   const [marketStatus, setMarketStatus] = useState<'idle' | 'loading'>('idle');
   const [marketUpdatedAt, setMarketUpdatedAt] = useState(
     () => window.localStorage.getItem(MARKET_UPDATED_AT_STORAGE) ?? '',
@@ -156,17 +176,26 @@ export default function Home() {
   const [cloudSyncStatus, setCloudSyncStatus] = useState<
     'disconnected' | 'syncing' | 'synced' | 'error'
   >('disconnected');
-  const isSyncingFromCloud = useRef(false);
+  const stateRef = useRef(state);
+  const cloudReadyUserId = useRef<string | null>(null);
+  const skipCloudSaveFingerprint = useRef<string | null>(null);
+  const marketRequestInFlight = useRef(false);
   const fileInput = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    if (!autoSync) return;
-    void refreshMarketPrices();
-    const timer = window.setInterval(() => {
-      void refreshMarketPrices();
-    }, 15000);
-    return () => window.clearInterval(timer);
-  }, [autoSync]);
+    stateRef.current = state;
+  }, [state]);
+
+  useEffect(() => {
+    const legacy = window.localStorage.getItem(LEGACY_MARKET_KEY_STORAGE) ?? '';
+    if (
+      /^https?:\/\//.test(legacy) &&
+      !window.localStorage.getItem(MARKET_PROXY_STORAGE)
+    ) {
+      window.localStorage.setItem(MARKET_PROXY_STORAGE, legacy);
+    }
+    window.localStorage.removeItem(LEGACY_MARKET_KEY_STORAGE);
+  }, []);
 
   // โหลดข้อมูลพอร์ตจาก IndexedDB ในเครื่องก่อน
   useEffect(() => {
@@ -177,87 +206,115 @@ export default function Home() {
         setSaveStatus('saved');
       })
       .catch(() => {
-        setReady(true);
         setSaveStatus('error');
-        setNotice('เปิดฐานข้อมูลในเบราว์เซอร์ไม่ได้ กรุณาส่งออกไฟล์สำรองก่อนปิดหน้า');
+        setNotice(
+          'ข้อมูลในเบราว์เซอร์ไม่ผ่านการตรวจสอบ ระบบหยุดบันทึกเพื่อไม่เขียนทับ กรุณานำเข้าไฟล์สำรองที่ถูกต้อง',
+        );
       });
   }, []);
 
-  // ติดตามสถานะ Login Google และดึงข้อมูลพอร์ตจาก Cloud
+  // ติดตามเฉพาะสถานะ Login; การรวมข้อมูลเริ่มหลัง IndexedDB โหลดเสร็จแล้ว
   useEffect(() => {
-    const unsub = subscribeToAuth(async (user) => {
+    const unsub = subscribeToAuth((user) => {
       setCurrentUser(user);
-      if (user) {
-        setCloudSyncStatus('syncing');
-        try {
-          const cloudState = await getCloudPortfolio(user.uid);
-          if (cloudState && cloudState.orders) {
-            isSyncingFromCloud.current = true;
-            setState(normalizePortfolioState(cloudState));
-            await savePortfolio(normalizePortfolioState(cloudState));
-            setTimeout(() => {
-              isSyncingFromCloud.current = false;
-            }, 100);
-          } else {
-            await saveCloudPortfolio(user.uid, state);
-          }
-          setCloudSyncStatus('synced');
-          setNotice(`เข้าสู่ระบบ Google สำเร็จ (${user.displayName || user.email})`);
-        } catch (error) {
-          console.error(error);
-          setCloudSyncStatus('error');
-        }
-      } else {
-        setCloudSyncStatus('disconnected');
-      }
+      cloudReadyUserId.current = null;
+      setCloudSyncStatus(user ? 'syncing' : 'disconnected');
     });
     return () => unsub();
   }, []);
 
-  // ฟังการเปลี่ยนแปลงจากอุปกรณ์อื่นแบบ Realtime (ถ้าเปิดในคอมและมือถือพร้อมกัน)
+  // โหลด local ก่อน แล้วค่อยเลือกข้อมูลที่ใหม่กว่าด้วย revision + updatedAt
   useEffect(() => {
-    if (!currentUser) return;
-    const unsub = subscribeToCloudPortfolio(
-      currentUser.uid,
-      (cloudData) => {
-        if (cloudData && cloudData.orders) {
-          isSyncingFromCloud.current = true;
-          setState(normalizePortfolioState(cloudData));
-          void savePortfolio(normalizePortfolioState(cloudData));
-          setTimeout(() => {
-            isSyncingFromCloud.current = false;
-          }, 100);
-          setCloudSyncStatus('synced');
+    if (!ready || !currentUser) return;
+    let cancelled = false;
+    let unsubscribeCloud: (() => void) | undefined;
+    const user = currentUser;
+
+    const startCloudSync = async () => {
+      setCloudSyncStatus('syncing');
+      try {
+        const cloudState = await getCloudPortfolio(user.uid);
+        if (cancelled) return;
+        const localState = stateRef.current;
+        if (cloudState) {
+          const comparison = comparePortfolioFreshness(cloudState, localState);
+          if (comparison > 0) {
+            await saveRecoverySnapshot(localState, 'before-cloud-replace');
+            skipCloudSaveFingerprint.current = portfolioFingerprint(cloudState);
+            stateRef.current = cloudState;
+            setState(cloudState);
+            await savePortfolio(cloudState);
+          } else if (comparison < 0) {
+            await saveCloudPortfolio(user.uid, localState);
+          }
+        } else {
+          await saveCloudPortfolio(user.uid, localState);
         }
-      },
-      (error) => {
-        console.error('Firestore sync error:', error);
+        if (cancelled) return;
+        cloudReadyUserId.current = user.uid;
+        setCloudSyncStatus('synced');
+        setNotice(`ซิงก์ Google สำเร็จ (${user.displayName || user.email})`);
+
+        unsubscribeCloud = subscribeToCloudPortfolio(
+          user.uid,
+          (remoteState) => {
+            if (comparePortfolioFreshness(remoteState, stateRef.current) <= 0)
+              return;
+            void saveRecoverySnapshot(stateRef.current, 'before-cloud-replace');
+            skipCloudSaveFingerprint.current =
+              portfolioFingerprint(remoteState);
+            stateRef.current = remoteState;
+            setState(remoteState);
+            void savePortfolio(remoteState);
+            setCloudSyncStatus('synced');
+            setNotice('รับข้อมูลพอร์ตเวอร์ชันใหม่จากอุปกรณ์อื่นแล้ว');
+          },
+          (error) => {
+            console.error('Firestore sync error:', error);
+            setCloudSyncStatus('error');
+          },
+        );
+      } catch (error) {
+        console.error('Cloud initial sync error:', error);
         setCloudSyncStatus('error');
-      },
-    );
-    return () => unsub();
-  }, [currentUser]);
+        setNotice('ซิงก์ Cloud ไม่สำเร็จ ข้อมูลในเครื่องยังปลอดภัย');
+      }
+    };
+    void startCloudSync();
+
+    return () => {
+      cancelled = true;
+      if (cloudReadyUserId.current === user.uid)
+        cloudReadyUserId.current = null;
+      unsubscribeCloud?.();
+    };
+  }, [ready, currentUser]);
 
   // บันทึกข้อมูลลง IndexedDB ในเครื่อง และส่งขึ้น Cloud เมื่อมีการแก้ไข
   useEffect(() => {
     if (!ready) return;
     const timer = window.setTimeout(() => {
       setSaveStatus('saving');
-      savePortfolio(state)
+      void savePortfolio(state)
         .then(() => setSaveStatus('saved'))
         .catch(() => setSaveStatus('error'));
 
-      // ถ้าล็อกอินอยู่และไม่ใช่จังหวะที่รับข้อมูลมาจาก Cloud ให้อัปโหลดขึ้น Cloud
-      if (currentUser && !isSyncingFromCloud.current) {
+      if (currentUser && cloudReadyUserId.current === currentUser.uid) {
+        const fingerprint = portfolioFingerprint(state);
+        if (skipCloudSaveFingerprint.current === fingerprint) {
+          skipCloudSaveFingerprint.current = null;
+          setCloudSyncStatus('synced');
+          return;
+        }
         setCloudSyncStatus('syncing');
-        saveCloudPortfolio(currentUser.uid, state)
+        void saveCloudPortfolio(currentUser.uid, state)
           .then(() => setCloudSyncStatus('synced'))
           .catch((error) => {
             console.error('Cloud save error:', error);
             setCloudSyncStatus('error');
           });
       }
-    }, 200);
+    }, 350);
     return () => window.clearTimeout(timer);
   }, [ready, state, currentUser]);
 
@@ -300,59 +357,76 @@ export default function Home() {
 
   const updatePrice = (symbol: SymbolCode, value: string) => {
     const price = Number(value);
-    if (!Number.isFinite(price) || price < 0) return;
-    setState((current) => ({
-      ...current,
-      currentPrices: { ...current.currentPrices, [symbol]: price },
-      updatedAt: new Date().toISOString(),
-    }));
+    if (!Number.isFinite(price) || price <= 0) return;
+    setState((current) =>
+      touchPortfolioState({
+        ...current,
+        currentPrices: { ...current.currentPrices, [symbol]: price },
+      }),
+    );
   };
 
-  const refreshMarketPrices = async (apiKey = marketApiKey) => {
-    setMarketStatus('loading');
-    try {
-      const snapshot = await fetchCurrentMarketPrices(
-        apiKey,
-        fetch,
-        state.currentPrices,
-      );
-      setState((current) => ({
-        ...current,
-        currentPrices: {
-          ...current.currentPrices,
-          ...snapshot.prices,
-        },
-        updatedAt: snapshot.fetchedAt,
-      }));
-      setMarketUpdatedAt(snapshot.fetchedAt);
-      window.localStorage.setItem(MARKET_UPDATED_AT_STORAGE, snapshot.fetchedAt);
-      setNotice('อัปเดตราคาตลาดโลก (XAU/USD Realtime) เรียบร้อยแล้ว');
-      return true;
-    } catch (error) {
-      setNotice(
-        error instanceof Error ? error.message : 'เชื่อมต่อผู้ให้บริการราคาไม่สำเร็จ',
-      );
-      return false;
-    } finally {
-      setMarketStatus('idle');
+  const refreshMarketPrices = useCallback(
+    async (proxyUrl = marketProxyUrl) => {
+      if (marketRequestInFlight.current) return false;
+      marketRequestInFlight.current = true;
+      setMarketStatus('loading');
+      try {
+        const snapshot = await fetchCurrentMarketPrices(proxyUrl, fetch);
+        setState((current) =>
+          touchPortfolioState(
+            {
+              ...current,
+              currentPrices: snapshot.prices,
+            },
+            snapshot.fetchedAt,
+          ),
+        );
+        setMarketUpdatedAt(snapshot.fetchedAt);
+        window.localStorage.setItem(
+          MARKET_UPDATED_AT_STORAGE,
+          snapshot.fetchedAt,
+        );
+        setNotice('อัปเดต XAU/USD และ WTI/USD จาก Twelve Data เรียบร้อยแล้ว');
+        return true;
+      } catch (error) {
+        setNotice(
+          error instanceof Error ? error.message : 'เชื่อมต่อผู้ให้บริการราคาไม่สำเร็จ',
+        );
+        return false;
+      } finally {
+        marketRequestInFlight.current = false;
+        setMarketStatus('idle');
+      }
+    },
+    [marketProxyUrl],
+  );
+
+  useEffect(() => {
+    if (!autoSync || !marketProxyUrl) return;
+    const timer = window.setInterval(() => {
+      void refreshMarketPrices();
+    }, 60_000);
+    return () => window.clearInterval(timer);
+  }, [autoSync, marketProxyUrl, refreshMarketPrices]);
+
+  const connectMarketPrices = async (proxyUrl: string) => {
+    const normalizedUrl = proxyUrl.trim();
+    if (await refreshMarketPrices(normalizedUrl)) {
+      setMarketProxyUrl(normalizedUrl);
+      window.localStorage.setItem(MARKET_PROXY_STORAGE, normalizedUrl);
+      setMarketOpen(false);
     }
   };
 
-  const connectMarketPrices = async (apiKey: string) => {
-    const normalizedKey = apiKey.trim();
-    setMarketApiKey(normalizedKey);
-    window.localStorage.setItem(MARKET_API_KEY_STORAGE, normalizedKey);
-    if (await refreshMarketPrices(normalizedKey)) setMarketOpen(false);
-  };
-
   const disconnectMarketPrices = () => {
-    window.localStorage.removeItem(MARKET_API_KEY_STORAGE);
+    window.localStorage.removeItem(MARKET_PROXY_STORAGE);
     window.localStorage.removeItem(MARKET_UPDATED_AT_STORAGE);
-    setMarketApiKey('');
+    setMarketProxyUrl('');
     setMarketUpdatedAt('');
     setAutoSync(false);
     setMarketOpen(false);
-    setNotice('ลบ API key แล้ว ราคาที่บันทึกในพอร์ตยังคงเดิม');
+    setNotice('ลบ Proxy URL แล้ว ราคาที่บันทึกในพอร์ตยังคงเดิม');
   };
 
   const exportBackup = () => {
@@ -372,13 +446,16 @@ export default function Home() {
     if (!file) return;
     try {
       const parsed = JSON.parse(await file.text()) as unknown;
-      if (!isPortfolioState(parsed)) throw new Error('invalid');
+      const imported = parsePortfolioState(parsed);
+      await saveRecoverySnapshot(stateRef.current, 'before-import');
       setState(
-        normalizePortfolioState({
-          ...parsed,
+        touchPortfolioState({
+          ...imported,
           updatedAt: new Date().toISOString(),
         }),
       );
+      setReady(true);
+      setSaveStatus('saving');
       setNotice('นำเข้าข้อมูลสำรองเรียบร้อย');
     } catch {
       setNotice('ไฟล์สำรองไม่ถูกต้อง จึงไม่ได้เปลี่ยนข้อมูลเดิม');
@@ -470,7 +547,9 @@ export default function Home() {
                   </span>
                   <span className="flex items-center gap-1 text-[10px] text-emerald-600">
                     <CloudCheck className="size-3" />
-                    {cloudSyncStatus === 'syncing' ? 'กำลังซิงค์...' : 'Sync คลาวด์แล้ว'}
+                    {cloudSyncStatus === 'syncing'
+                      ? 'กำลังซิงค์...'
+                      : 'Sync คลาวด์แล้ว'}
                   </span>
                 </div>
                 <Button
@@ -566,19 +645,26 @@ export default function Home() {
                   ? 'bg-emerald-600 hover:bg-emerald-700 text-white shadow-sm'
                   : 'text-muted-foreground'
               }
-              onClick={() => {
-                const next = !autoSync;
-                setAutoSync(next);
-                if (next) void refreshMarketPrices();
+              onClick={async () => {
+                if (!marketProxyUrl) {
+                  setMarketOpen(true);
+                  setNotice('ตั้งค่า Proxy URL ก่อนเปิด Auto Sync');
+                  return;
+                }
+                if (autoSync) {
+                  setAutoSync(false);
+                } else if (await refreshMarketPrices()) {
+                  setAutoSync(true);
+                }
               }}
-              title="ดึงราคา Realtime อัตโนมัติทุก 15 วินาที"
+              title="ดึงราคา XAU/USD และ WTI/USD อัตโนมัติทุก 60 วินาที"
             >
               <span
                 className={`inline-block size-2 rounded-full mr-1.5 ${
                   autoSync ? 'bg-white animate-pulse' : 'bg-emerald-500'
                 }`}
               />
-              {autoSync ? 'Auto (15s)' : 'เปิด Auto'}
+              {autoSync ? 'Auto (60s)' : 'เปิด Auto'}
             </Button>
             <Button
               size="sm"
@@ -615,7 +701,8 @@ export default function Home() {
                   กราฟราคา Realtime (TradingView)
                 </CardTitle>
                 <CardDescription className="text-xs">
-                  ข้อมูลสด Realtime จากตลาดโลก • ไม่ต้องใช้ API Key • ปลอดภัย 100% ไม่เสี่ยง Key หลุด
+                  ข้อมูลสด Realtime จากตลาดโลก • ไม่ต้องใช้ API Key • ปลอดภัย 100%
+                  ไม่เสี่ยง Key หลุด
                 </CardDescription>
               </div>
               <div className="flex flex-wrap items-center gap-2">
@@ -906,13 +993,23 @@ export default function Home() {
               </CardAction>
             </CardHeader>
             <CardContent className="space-y-1 px-3 py-2">
-              <HistoryList state={state} />
+              <HistoryList state={state} limit={8} />
+              {state.closes.length + state.cashFlows.length > 0 && (
+                <Button
+                  className="mt-2 w-full"
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => setHistoryOpen(true)}
+                >
+                  <History /> ดูประวัติทั้งหมด
+                </Button>
+              )}
             </CardContent>
           </Card>
         </section>
 
         <footer className="mt-6 flex flex-col gap-2 border-t border-border/70 py-5 text-xs text-muted-foreground sm:flex-row sm:items-center sm:justify-between">
-          <span>RiskLedger v1 · บันทึกในฐานข้อมูลของเบราว์เซอร์เครื่องนี้</span>
+          <span>RiskLedger v2 · IndexedDB + revisioned cloud sync</span>
           <span>อัปเดตล่าสุด {dateTime(state.updatedAt)}</span>
         </footer>
       </div>
@@ -921,11 +1018,12 @@ export default function Home() {
         open={addOpen}
         onOpenChange={setAddOpen}
         onSubmit={(order) => {
-          setState((current) => ({
-            ...current,
-            orders: [order, ...current.orders],
-            updatedAt: new Date().toISOString(),
-          }));
+          setState((current) =>
+            touchPortfolioState({
+              ...current,
+              orders: [order, ...current.orders],
+            }),
+          );
           setAddOpen(false);
           setNotice('เพิ่มออเดอร์และบันทึกแล้ว');
         }}
@@ -949,50 +1047,53 @@ export default function Home() {
           }}
         />
       )}
-      <CashFlowDialog
-        open={cashOpen}
-        onOpenChange={setCashOpen}
-        currentBalance={accountBalance}
-        onSubmit={(flow) => {
-          setState((current) => ({
-            ...current,
-            cashFlows: [flow, ...current.cashFlows],
-            updatedAt: new Date().toISOString(),
-          }));
-          setCashOpen(false);
-          setNotice(
-            flow.kind === 'DEPOSIT'
-              ? 'บันทึกการฝากเงินเรียบร้อยแล้ว'
-              : 'บันทึกการถอนเงินเรียบร้อยแล้ว',
-          );
-        }}
-        onSetBalance={(targetBalance, note) => {
-          const diff = targetBalance - accountBalance;
-          if (Math.abs(diff) < 0.001) {
-            setCashOpen(false);
-            return;
-          }
-          const flow: CashFlow = {
-            id: crypto.randomUUID(),
-            kind: diff > 0 ? 'DEPOSIT' : 'WITHDRAWAL',
-            amount: Number(Math.abs(diff).toFixed(2)),
-            occurredAt: new Date().toISOString(),
-            note: note.trim() || `ปรับยอด Balance เป็น ${money(targetBalance)}`,
-          };
-          setState((current) => ({
-            ...current,
-            cashFlows: [flow, ...current.cashFlows],
-            updatedAt: new Date().toISOString(),
-          }));
-          setCashOpen(false);
-          setNotice(`ปรับยอด Balance เป็น ${money(targetBalance)} เรียบร้อยแล้ว`);
-        }}
-      />
+      {cashOpen && (
+        <CashFlowDialog
+          key={accountBalance}
+          open
+          onOpenChange={setCashOpen}
+          currentBalance={accountBalance}
+          onSubmit={(flow) => {
+            try {
+              setState((current) => addCashFlow(current, flow));
+              setCashOpen(false);
+              setNotice(
+                flow.kind === 'DEPOSIT'
+                  ? 'บันทึกการฝากเงินเรียบร้อยแล้ว'
+                  : 'บันทึกการถอนเงินเรียบร้อยแล้ว',
+              );
+            } catch (error) {
+              setNotice(
+                error instanceof Error ? error.message : 'บันทึกรายการไม่สำเร็จ',
+              );
+            }
+          }}
+          onSetBalance={(targetBalance, note, occurredAt) => {
+            try {
+              const flow = createBalanceAdjustment(
+                stateRef.current,
+                targetBalance,
+                note,
+                occurredAt,
+              );
+              if (flow) setState((current) => addCashFlow(current, flow));
+              setCashOpen(false);
+              setNotice(
+                `ปรับยอด Balance เป็น ${money(targetBalance)} เรียบร้อยแล้ว`,
+              );
+            } catch (error) {
+              setNotice(
+                error instanceof Error ? error.message : 'ปรับ Balance ไม่สำเร็จ',
+              );
+            }
+          }}
+        />
+      )}
       {marketOpen && (
         <MarketPriceDialog
           open={marketOpen}
           onOpenChange={setMarketOpen}
-          initialApiKey={marketApiKey}
+          initialProxyUrl={marketProxyUrl}
           busy={marketStatus === 'loading'}
           onConnect={connectMarketPrices}
           onDisconnect={disconnectMarketPrices}
@@ -1004,14 +1105,72 @@ export default function Home() {
           open={settingsOpen}
           onOpenChange={setSettingsOpen}
           state={state}
+          onRestore={async () => {
+            try {
+              const snapshot = await loadLatestRecoverySnapshot();
+              if (!snapshot) {
+                setNotice('ยังไม่มีข้อมูล Recovery จาก Import หรือ Cloud');
+                return;
+              }
+              await saveRecoverySnapshot(stateRef.current, 'before-recovery');
+              setState(touchPortfolioState(snapshot.state));
+              setSettingsOpen(false);
+              setNotice(`กู้ข้อมูลก่อนหน้าเรียบร้อย (${dateTime(snapshot.savedAt)})`);
+            } catch {
+              setNotice('กู้ข้อมูลไม่สำเร็จ จึงไม่ได้เปลี่ยนข้อมูลปัจจุบัน');
+            }
+          }}
           onSubmit={(settings) => {
-            setState((current) => ({
-              ...current,
-              initialBalance: settings.initialBalance,
-              updatedAt: new Date().toISOString(),
-            }));
+            setState((current) => {
+              if (current.cashFlows.length || current.closes.length)
+                return current;
+              return touchPortfolioState({
+                ...current,
+                initialBalance: settings.initialBalance,
+              });
+            });
             setSettingsOpen(false);
-            setNotice('บันทึกการตั้งค่าแล้ว');
+            setNotice(
+              state.cashFlows.length || state.closes.length
+                ? 'แก้ทุนตั้งต้นไม่ได้หลังมีประวัติ กรุณาใช้ “ปรับยอด Balance”'
+                : 'บันทึกทุนตั้งต้นแล้ว',
+            );
+          }}
+        />
+      )}
+      {historyOpen && (
+        <HistoryDialog
+          open={historyOpen}
+          onOpenChange={setHistoryOpen}
+          state={state}
+          onExport={exportBackup}
+          onEdit={(kind, id, note) => {
+            try {
+              setState((current) =>
+                kind === 'CLOSE'
+                  ? updateCloseNote(current, id, note)
+                  : updateCashFlowNote(current, id, note),
+              );
+              setNotice('แก้ไขหมายเหตุแล้ว');
+            } catch (error) {
+              setNotice(
+                error instanceof Error ? error.message : 'แก้รายการไม่สำเร็จ',
+              );
+            }
+          }}
+          onReverse={(kind, id, note) => {
+            try {
+              setState((current) =>
+                kind === 'CLOSE'
+                  ? reverseClose(current, id, note)
+                  : reverseCashFlow(current, id, note),
+              );
+              setNotice('ย้อนรายการแล้ว โดยยังเก็บรายการเดิมไว้ในประวัติ');
+            } catch (error) {
+              setNotice(
+                error instanceof Error ? error.message : 'ย้อนรายการไม่สำเร็จ',
+              );
+            }
           }}
         />
       )}
@@ -1180,30 +1339,70 @@ function EmptyState({ label }: { label: string }) {
   );
 }
 
-function HistoryList({ state }: { state: PortfolioState }) {
-  const items = [
+type JournalItem = {
+  id: string;
+  kind: 'CLOSE' | 'CASH_FLOW';
+  date: string;
+  title: string;
+  detail: string;
+  note: string;
+  amount: number;
+  reversed: boolean;
+  reversalNote?: string;
+};
+
+function getJournalItems(state: PortfolioState): JournalItem[] {
+  return [
     ...state.closes.map((close) => ({
       id: close.id,
+      kind: 'CLOSE' as const,
       date: close.closedAt,
       title: `ปิด ${close.symbol} ${close.side}`,
       detail: `${number(close.lots, 2)} lot @ ${money(close.exitPrice)}`,
+      note: close.note,
       amount: close.realizedPnl,
+      reversed: Boolean(close.reversedAt),
+      reversalNote: close.reversalNote,
     })),
     ...state.cashFlows.map((flow) => ({
       id: flow.id,
+      kind: 'CASH_FLOW' as const,
       date: flow.occurredAt,
-      title: flow.kind === 'DEPOSIT' ? 'เพิ่มทุน' : 'ถอนทุน',
-      detail: flow.note || 'ปรับยอดทุน',
-      amount: flow.kind === 'DEPOSIT' ? flow.amount : -flow.amount,
+      title:
+        flow.kind === 'DEPOSIT'
+          ? 'ฝากเงิน'
+          : flow.kind === 'WITHDRAWAL'
+            ? 'ถอนเงิน'
+            : 'ปรับยอด Balance',
+      detail:
+        flow.kind === 'BALANCE_ADJUSTMENT' && flow.balanceAfter !== undefined
+          ? `${money(flow.balanceBefore ?? 0)} → ${money(flow.balanceAfter)}`
+          : flow.note || 'รายการเงิน',
+      note: flow.note,
+      amount:
+        flow.kind === 'BALANCE_ADJUSTMENT'
+          ? flow.amount
+          : getCashFlowImpact(flow),
+      reversed: Boolean(flow.reversedAt),
+      reversalNote: flow.reversalNote,
     })),
-  ]
-    .sort((a, b) => b.date.localeCompare(a.date))
-    .slice(0, 8);
+  ].sort((a, b) => b.date.localeCompare(a.date));
+}
+
+function HistoryList({
+  state,
+  limit,
+}: {
+  state: PortfolioState;
+  limit?: number;
+}) {
+  const allItems = getJournalItems(state);
+  const items = limit ? allItems.slice(0, limit) : allItems;
   if (!items.length) return <EmptyState label="ยังไม่มีประวัติการปิดหรือปรับทุน" />;
   return items.map((item) => (
     <div
       key={item.id}
-      className="flex items-center gap-3 rounded-lg px-2 py-2.5 hover:bg-muted/55"
+      className={`flex items-center gap-3 rounded-lg px-2 py-2.5 hover:bg-muted/55 ${item.reversed ? 'opacity-55' : ''}`}
     >
       <span
         className={`flex size-8 shrink-0 items-center justify-center rounded-full ${item.amount >= 0 ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-700'}`}
@@ -1211,7 +1410,12 @@ function HistoryList({ state }: { state: PortfolioState }) {
         <History className="size-4" />
       </span>
       <span className="min-w-0 flex-1">
-        <span className="block font-medium">{item.title}</span>
+        <span
+          className={`block font-medium ${item.reversed ? 'line-through' : ''}`}
+        >
+          {item.title}
+          {item.reversed ? ' · ย้อนแล้ว' : ''}
+        </span>
         <span className="block truncate text-xs text-muted-foreground">
           {item.detail} · {dateTime(item.date)}
         </span>
@@ -1219,10 +1423,155 @@ function HistoryList({ state }: { state: PortfolioState }) {
       <span
         className={`font-mono text-xs font-semibold ${item.amount >= 0 ? 'text-emerald-700' : 'text-red-700'}`}
       >
-        {signedMoney(item.amount)}
+        {item.reversed ? money(0) : signedMoney(item.amount)}
       </span>
     </div>
   ));
+}
+
+function HistoryDialog({
+  open,
+  onOpenChange,
+  state,
+  onExport,
+  onEdit,
+  onReverse,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  state: PortfolioState;
+  onExport: () => void;
+  onEdit: (kind: JournalItem['kind'], id: string, note: string) => void;
+  onReverse: (kind: JournalItem['kind'], id: string, note: string) => void;
+}) {
+  const [action, setAction] = useState<{
+    mode: 'EDIT' | 'REVERSE';
+    item: JournalItem;
+  } | null>(null);
+  const [actionNote, setActionNote] = useState('');
+  const items = getJournalItems(state);
+
+  const startAction = (mode: 'EDIT' | 'REVERSE', item: JournalItem) => {
+    setAction({ mode, item });
+    setActionNote(mode === 'EDIT' ? item.note : 'ย้อนรายการที่บันทึกผิด');
+  };
+  const submitAction = (event: React.SyntheticEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!action) return;
+    if (action.mode === 'EDIT') {
+      onEdit(action.item.kind, action.item.id, actionNote);
+    } else {
+      onReverse(action.item.kind, action.item.id, actionNote);
+    }
+    setAction(null);
+    setActionNote('');
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-h-[88vh] sm:max-w-3xl">
+        <DialogHeader>
+          <DialogTitle>ประวัติทั้งหมด</DialogTitle>
+          <DialogDescription>
+            แก้ไขหมายเหตุหรือย้อนรายการที่บันทึกผิด รายการเดิมจะไม่ถูกลบจากสมุดบันทึก
+          </DialogDescription>
+        </DialogHeader>
+        <div className="flex items-center justify-between gap-3 rounded-lg bg-muted/55 px-3 py-2 text-xs">
+          <span>
+            {items.length} รายการ · revision {state.revision}
+          </span>
+          <Button size="sm" variant="outline" onClick={onExport}>
+            <Download /> สำรอง JSON
+          </Button>
+        </div>
+        <div className="min-h-28 space-y-2 overflow-y-auto pr-1">
+          {items.length ? (
+            items.map((item) => (
+              <div
+                key={`${item.kind}-${item.id}`}
+                className={`rounded-lg border border-border/75 p-3 ${item.reversed ? 'bg-muted/35 opacity-65' : 'bg-card'}`}
+              >
+                <div className="flex flex-wrap items-start gap-3">
+                  <span className="min-w-0 flex-1">
+                    <span
+                      className={`block font-medium ${item.reversed ? 'line-through' : ''}`}
+                    >
+                      {item.title}
+                      {item.reversed ? ' · ย้อนแล้ว' : ''}
+                    </span>
+                    <span className="block text-xs text-muted-foreground">
+                      {item.detail} · {dateTime(item.date)}
+                    </span>
+                    {item.note && (
+                      <span className="mt-1 block text-xs">{item.note}</span>
+                    )}
+                    {item.reversalNote && (
+                      <span className="mt-1 block text-xs text-amber-700">
+                        เหตุผลที่ย้อน: {item.reversalNote}
+                      </span>
+                    )}
+                  </span>
+                  <span className="font-mono text-sm font-semibold">
+                    {item.reversed ? money(0) : signedMoney(item.amount)}
+                  </span>
+                  <span className="flex gap-1">
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => startAction('EDIT', item)}
+                    >
+                      แก้หมายเหตุ
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={item.reversed}
+                      onClick={() => startAction('REVERSE', item)}
+                    >
+                      ย้อนรายการ
+                    </Button>
+                  </span>
+                </div>
+              </div>
+            ))
+          ) : (
+            <EmptyState label="ยังไม่มีประวัติ" />
+          )}
+        </div>
+        {action && (
+          <form
+            onSubmit={submitAction}
+            className="grid gap-2 rounded-lg border border-primary/25 bg-primary/5 p-3"
+          >
+            <strong className="text-sm">
+              {action.mode === 'EDIT' ? 'แก้ไขหมายเหตุ' : 'ยืนยันย้อนรายการ'}:{' '}
+              {action.item.title}
+            </strong>
+            <Input
+              value={actionNote}
+              onChange={(event) => setActionNote(event.target.value)}
+              placeholder={
+                action.mode === 'EDIT' ? 'หมายเหตุ' : 'เหตุผลที่ย้อนรายการ'
+              }
+            />
+            <span className="flex justify-end gap-2">
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                onClick={() => setAction(null)}
+              >
+                ยกเลิก
+              </Button>
+              <Button type="submit" size="sm">
+                {action.mode === 'EDIT' ? 'บันทึก' : 'ยืนยันย้อนรายการ'}
+              </Button>
+            </span>
+          </form>
+        )}
+      </DialogContent>
+    </Dialog>
+  );
 }
 
 function AddOrderDialog({
@@ -1246,7 +1595,11 @@ function AddOrderDialog({
     event.preventDefault();
     const entryPrice = Number(price);
     const initialLots = Number(lots);
-    if (!(entryPrice > 0) || !(initialLots > 0)) {
+    if (
+      !(entryPrice > 0) ||
+      !(initialLots > 0) ||
+      !Number.isFinite(Date.parse(openedAt))
+    ) {
       setError('กรุณากรอกราคาและ Lot ให้มากกว่า 0');
       return;
     }
@@ -1329,6 +1682,7 @@ function AddOrderDialog({
           <Field label="วันที่และเวลาเปิด">
             <Input
               type="datetime-local"
+              required
               value={openedAt}
               onChange={(event) => setOpenedAt(event.target.value)}
             />
@@ -1397,7 +1751,8 @@ function CloseOrderDialog({
     if (
       !(closeLots > 0) ||
       closeLots - order.openLots > 1e-9 ||
-      !(closePrice > 0)
+      !(closePrice > 0) ||
+      !Number.isFinite(Date.parse(closedAt))
     ) {
       setError('ตรวจสอบ Lot และราคาปิดอีกครั้ง');
       return;
@@ -1446,6 +1801,7 @@ function CloseOrderDialog({
           <Field label="วันที่และเวลาปิด">
             <Input
               type="datetime-local"
+              required
               value={closedAt}
               onChange={(event) => setClosedAt(event.target.value)}
             />
@@ -1493,45 +1849,56 @@ function CashFlowDialog({
   onOpenChange: (open: boolean) => void;
   currentBalance: number;
   onSubmit: (flow: CashFlow) => void;
-  onSetBalance: (targetBalance: number, note: string) => void;
+  onSetBalance: (
+    targetBalance: number,
+    note: string,
+    occurredAt: string,
+  ) => void;
 }) {
   const [mode, setMode] = useState<'SET_BALANCE' | 'DEPOSIT' | 'WITHDRAWAL'>(
     'SET_BALANCE',
   );
-  const [targetBalance, setTargetBalance] = useState('');
+  const [targetBalance, setTargetBalance] = useState(
+    String(Number(currentBalance.toFixed(2))),
+  );
   const [amount, setAmount] = useState('');
   const [note, setNote] = useState('');
-
-  useEffect(() => {
-    if (open) {
-      setTargetBalance(
-        currentBalance > 0 ? String(Number(currentBalance.toFixed(2))) : '',
-      );
-      setAmount('');
-      setNote('');
-    }
-  }, [open, currentBalance]);
+  const [occurredAt, setOccurredAt] = useState(nowForInput());
+  const [error, setError] = useState('');
 
   const submit = (event: React.SyntheticEvent<HTMLFormElement>) => {
     event.preventDefault();
+    if (!Number.isFinite(Date.parse(occurredAt))) {
+      setError('วันที่และเวลารายการไม่ถูกต้อง');
+      return;
+    }
     if (mode === 'SET_BALANCE') {
       const val = Number(targetBalance);
-      if (!Number.isFinite(val) || val < 0) return;
-      onSetBalance(val, note);
+      if (!Number.isFinite(val) || val < 0) {
+        setError('Balance ต้องเป็นตัวเลขตั้งแต่ 0 ขึ้นไป');
+        return;
+      }
+      onSetBalance(val, note, new Date(occurredAt).toISOString());
       return;
     }
 
     const value = Number(amount);
-    if (!(value > 0)) return;
+    if (!(value > 0)) {
+      setError('จำนวนเงินต้องมากกว่า 0');
+      return;
+    }
+    if (mode === 'WITHDRAWAL' && value - currentBalance > 1e-9) {
+      setError(`ถอนได้สูงสุด ${money(currentBalance)}`);
+      return;
+    }
     onSubmit({
       id: crypto.randomUUID(),
       kind: mode,
       amount: Number(value.toFixed(2)),
-      occurredAt: new Date().toISOString(),
+      occurredAt: new Date(occurredAt).toISOString(),
       note: note.trim(),
     });
-    setAmount('');
-    setNote('');
+    setError('');
   };
 
   const calculatedNewBalance =
@@ -1590,9 +1957,13 @@ function CashFlowDialog({
           <div className="rounded-lg border border-border/80 bg-muted/40 p-3 text-xs leading-5">
             <div className="flex justify-between">
               <span className="text-muted-foreground">Balance ปัจจุบัน:</span>
-              <span className="font-mono font-semibold">{money(currentBalance)}</span>
+              <span className="font-mono font-semibold">
+                {money(currentBalance)}
+              </span>
             </div>
-            <div className="flex justify-between font-medium text-emerald-700 dark:text-emerald-400">
+            <div
+              className={`flex justify-between font-medium ${calculatedNewBalance >= 0 ? 'text-emerald-700 dark:text-emerald-400' : 'text-red-700 dark:text-red-400'}`}
+            >
               <span>Balance หลังการปรับ:</span>
               <span className="font-mono font-bold">
                 {money(calculatedNewBalance)}
@@ -1611,7 +1982,8 @@ function CashFlowDialog({
                 onChange={(event) => setTargetBalance(event.target.value)}
               />
               <span className="text-[11px] text-muted-foreground">
-                พิมพ์ตัวเลข Balance ใน MT4/MT5 ของคุณได้เลย ยอด Balance จะเปลี่ยนเป็นเลขนี้ทันที
+                พิมพ์ตัวเลข Balance ใน MT4/MT5 ของคุณได้เลย ยอด Balance
+                จะเปลี่ยนเป็นเลขนี้ทันที
               </span>
             </Field>
           ) : (
@@ -1633,6 +2005,15 @@ function CashFlowDialog({
             </Field>
           )}
 
+          <Field label="วันที่และเวลารายการ">
+            <Input
+              type="datetime-local"
+              required
+              value={occurredAt}
+              onChange={(event) => setOccurredAt(event.target.value)}
+            />
+          </Field>
+
           <Field label="หมายเหตุ (ไม่บังคับ)">
             <Input
               value={note}
@@ -1646,6 +2027,8 @@ function CashFlowDialog({
               }
             />
           </Field>
+
+          {error && <p className="text-sm text-red-700">{error}</p>}
 
           <DialogFooter>
             <Button
@@ -1670,17 +2053,21 @@ function SettingsDialog({
   onOpenChange,
   state,
   onSubmit,
+  onRestore,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   state: PortfolioState;
   onSubmit: (settings: { initialBalance: number }) => void;
+  onRestore: () => Promise<void>;
 }) {
   const [initialBalance, setInitialBalance] = useState(
     String(state.initialBalance),
   );
+  const locked = state.cashFlows.length > 0 || state.closes.length > 0;
   const submit = (event: React.SyntheticEvent<HTMLFormElement>) => {
     event.preventDefault();
+    if (locked) return;
     const values = { initialBalance: Number(initialBalance) };
     if (!Number.isFinite(values.initialBalance) || values.initialBalance < 0)
       return;
@@ -1702,9 +2089,16 @@ function SettingsDialog({
               min="0"
               step="0.01"
               value={initialBalance}
+              disabled={locked}
               onChange={(event) => setInitialBalance(event.target.value)}
             />
           </Field>
+          {locked && (
+            <div className="rounded-lg bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">
+              ทุนตั้งต้นถูกล็อกหลังมีประวัติฝาก ถอน ปรับยอด หรือปิดออเดอร์ หากต้องการให้ยอดตรงกับ
+              MT4/MT5 ให้ใช้ “ฝาก-ถอน / ปรับ Balance”
+            </div>
+          )}
           <div className="grid gap-2 rounded-lg bg-sky-50 px-3 py-3 text-xs leading-5 text-sky-950">
             <p>
               <strong>GOLD Ultra Low Micro:</strong> 1 lot = 1 oz → ตัวคูณ ×1
@@ -1719,6 +2113,13 @@ function SettingsDialog({
           <div className="rounded-lg bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">
             ห้ามใช้กับ OILMn ซึ่งเป็นสัญญา Mini และมีขนาดต่างจาก OIL/OILCash ในไฟล์นี้
           </div>
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => void onRestore()}
+          >
+            <ArchiveRestore /> กู้ข้อมูลก่อน Import/Cloud ล่าสุด
+          </Button>
           <DialogFooter>
             <Button
               type="button"
@@ -1727,7 +2128,9 @@ function SettingsDialog({
             >
               ยกเลิก
             </Button>
-            <Button type="submit">บันทึกทุนตั้งต้น</Button>
+            <Button type="submit" disabled={locked}>
+              บันทึกทุนตั้งต้น
+            </Button>
           </DialogFooter>
         </form>
       </DialogContent>
@@ -1738,22 +2141,22 @@ function SettingsDialog({
 function MarketPriceDialog({
   open,
   onOpenChange,
-  initialApiKey,
+  initialProxyUrl,
   busy,
   onConnect,
   onDisconnect,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  initialApiKey: string;
+  initialProxyUrl: string;
   busy: boolean;
-  onConnect: (apiKey: string) => Promise<void>;
+  onConnect: (proxyUrl: string) => Promise<void>;
   onDisconnect: () => void;
 }) {
-  const [apiKey, setApiKey] = useState(initialApiKey);
+  const [proxyUrl, setProxyUrl] = useState(initialProxyUrl);
   const submit = (event: React.SyntheticEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (apiKey.trim()) void onConnect(apiKey);
+    if (proxyUrl.trim()) void onConnect(proxyUrl);
   };
 
   return (
@@ -1767,13 +2170,13 @@ function MarketPriceDialog({
           </DialogDescription>
         </DialogHeader>
         <form onSubmit={submit} className="grid gap-4">
-          <Field label="Twelve Data API key หรือ Cloudflare Proxy URL">
+          <Field label="Cloudflare Proxy URL">
             <Input
-              type="password"
+              type="url"
               autoComplete="off"
-              value={apiKey}
-              onChange={(event) => setApiKey(event.target.value)}
-              placeholder="ใส่ API key หรือ URL เช่น https://..."
+              value={proxyUrl}
+              onChange={(event) => setProxyUrl(event.target.value)}
+              placeholder="https://ชื่อ-worker.workers.dev/api/prices"
             />
           </Field>
           <div className="grid gap-2 rounded-lg bg-sky-50 px-3 py-3 text-xs leading-5 text-sky-950">
@@ -1781,10 +2184,11 @@ function MarketPriceDialog({
               <strong>แหล่งราคา:</strong> XAU/USD และ WTI/USD Commodity Aggregate
             </p>
             <p>
-              <strong>ความปลอดภัย:</strong> บันทึกเฉพาะในเบราว์เซอร์เครื่องนี้ (localStorage) ไม่ถูกส่งขึ้น GitHub
+              <strong>ความปลอดภัย:</strong> API key ต้องเก็บเป็น Cloudflare Secret
+              เท่านั้น หน้าเว็บบันทึกเฉพาะ URL และจะไม่รับ API key โดยตรง
             </p>
             <p>
-              <strong>คำแนะนำ:</strong> สามารถใส่ Twelve Data API key ตรงๆ หรือใส่ Cloudflare Worker Proxy URL เพื่อซ่อน Key 100%
+              <strong>URL ที่ถูกต้อง:</strong> ต้องลงท้ายด้วย <code>/api/prices</code>
             </p>
           </div>
           <div className="rounded-lg bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">
@@ -1803,10 +2207,10 @@ function MarketPriceDialog({
             <Button
               type="button"
               variant="ghost"
-              disabled={!initialApiKey || busy}
+              disabled={!initialProxyUrl || busy}
               onClick={onDisconnect}
             >
-              ลบ API key
+              ลบ Proxy URL
             </Button>
             <span className="flex gap-2">
               <Button
@@ -1816,7 +2220,7 @@ function MarketPriceDialog({
               >
                 ยกเลิก
               </Button>
-              <Button type="submit" disabled={!apiKey.trim() || busy}>
+              <Button type="submit" disabled={!proxyUrl.trim() || busy}>
                 {busy ? <RefreshCw className="animate-spin" /> : <KeyRound />}{' '}
                 บันทึกและดึงราคา
               </Button>

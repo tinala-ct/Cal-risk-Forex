@@ -4,6 +4,9 @@
   "main": "src/worker.ts",
   "compatibility_date": "2025-01-01",
   "compatibility_flags": ["nodejs_compat"],
+  "vars": {
+    "ALLOWED_ORIGINS": "https://tinala-ct.github.io"
+  },
   "assets": {
     "directory": "./dist",
     "binding": "ASSETS",

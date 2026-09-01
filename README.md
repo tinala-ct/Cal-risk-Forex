@@ -1,6 +1,6 @@
 # RiskLedger — XAU & Oil Portfolio
 
-เว็บแอปสำหรับบันทึกออเดอร์ XAUUSD และ Oil ที่ยังเปิดอยู่ คำนวณต้นทุนเฉลี่ย P/L, Equity และราคาล้างตามสูตรใน Excel รองรับทั้ง BUY, SELL, การปิดบางส่วน และประวัติการเพิ่ม/ถอนทุน พร้อมแบบจำลองทุนร่วม XAU + Oil เป็นผลเสริม
+เว็บแอปสำหรับบันทึกออเดอร์ XAUUSD และ Oil ที่ยังเปิดอยู่ คำนวณต้นทุนเฉลี่ย P/L, Equity และราคาล้างตามสูตรใน Excel รองรับ BUY, SELL, การปิดบางส่วน ฝาก ถอน ปรับยอด Balance และสมุดประวัติระยะยาว พร้อมแบบจำลองทุนร่วม XAU + Oil เป็นผลเสริม
 
 ## ข้อมูลตั้งต้นจาก Excel
 
@@ -29,18 +29,45 @@ Equity   = Balance + Unrealized P/L
 
 ## การเก็บข้อมูล
 
-ข้อมูลบันทึกใน IndexedDB ของเบราว์เซอร์และไม่ถูก reset เมื่อ reload หน้า รายการที่ปิดแล้วจะย้ายไปเป็นประวัติและ Realized P/L จะถูกนำไปคำนวณ Balance ต่อ
+ข้อมูลบันทึกใน IndexedDB ของเบราว์เซอร์และไม่ถูก reset เมื่อ reload หน้า รายการที่ปิดแล้วจะอยู่ในประวัติและ Realized P/L จะถูกนำไปคำนวณ Balance ต่อ
 
-ควรกด **สำรองข้อมูล** เป็นไฟล์ JSON เป็นระยะ โดยเฉพาะก่อนล้างข้อมูลเบราว์เซอร์ เปลี่ยนเครื่อง หรือเปลี่ยน browser profile เพราะข้อมูลเวอร์ชันนี้อยู่เฉพาะในเบราว์เซอร์เครื่องนั้น
+```text
+Balance = ทุนตั้งต้น + ฝาก - ถอน + รายการปรับยอด + Realized P/L
+```
+
+- “ฝากเงิน” และ “ถอนเงิน” เป็น cash flow จริง โดยถอนเกิน Balance ไม่ได้
+- “ปรับยอด Balance” เป็นรายการ `BALANCE_ADJUSTMENT` แยกจากฝาก/ถอน พร้อมยอดก่อนและหลัง
+- ทุนตั้งต้นแก้ได้ก่อนมีประวัติ cash flow หรือปิดออเดอร์เท่านั้น หลังจากนั้นให้ใช้ “ปรับยอด Balance”
+- ประวัติเต็มสามารถแก้หมายเหตุและย้อนรายการได้ การย้อนจะเก็บรายการเดิมไว้เป็น audit trail
+- ไฟล์ข้อมูล version 1 จะถูกตรวจสอบและ migrate เป็น version 2 อัตโนมัติ ข้อมูลผิดรูปแบบจะไม่ถูกนำเข้าหรือเขียนทับข้อมูลเดิม
+- ก่อน Import หรือก่อนรับ Cloud เวอร์ชันใหม่ ระบบเก็บ Recovery snapshot ใน IndexedDB สูงสุด 10 ชุด และกู้ชุดล่าสุดได้จากหน้าตั้งค่า
+
+หากล็อกอิน Google ระบบจะเปรียบเทียบ `revision` และ `updatedAt` ก่อนเลือกข้อมูลในเครื่องหรือ Cloud ที่ใหม่กว่า และจะไม่เขียน echo จาก Realtime กลับขึ้น Cloud ซ้ำ ควรกด **สำรองข้อมูล** เป็น JSON เป็นระยะ โดยเฉพาะก่อนล้างข้อมูลเบราว์เซอร์หรือเปลี่ยนเครื่อง
+
+กฎ Firestore แบบเจ้าของอ่าน/เขียนได้คนเดียวอยู่ใน `firestore.rules` หลังเชื่อม Firebase CLI ให้ deploy ด้วย:
+
+```bash
+firebase deploy --only firestore:rules
+```
 
 ## เชื่อมราคาตลาดปัจจุบัน
 
-ปุ่ม **เชื่อมราคา** รองรับราคาอ้างอิง `XAU/USD` spot และ `WTI/USD` spot จาก [Twelve Data](https://twelvedata.com/commodities) โดยต้องใส่ API key ของผู้ใช้เอง และแผน API ต้องรองรับ commodity price endpoint
+ปุ่ม **เชื่อมราคา** รองรับราคาอ้างอิง `XAU/USD` spot และ `WTI/USD` spot จาก [Twelve Data](https://twelvedata.com/commodities) ผ่าน Cloudflare Worker Proxy เท่านั้น แอปไม่ใช้ PAXG/USDT แทน XAUUSD และจะไม่ใช้ราคา Oil เก่าปะปนกับข้อมูลสด
 
-- API key เก็บใน browser เครื่องนั้น ไม่ถูก commit ขึ้น GitHub และไม่รวมในไฟล์สำรองพอร์ต
-- ระบบดึงราคาเมื่อกด **อัปเดตราคา** เท่านั้น เพื่อไม่ใช้ API credits ต่อเนื่อง
+- เก็บ `TWELVE_DATA_API_KEY` เป็น Cloudflare Secret ห้ามใส่ API key ในหน้าเว็บ, source code หรือ GitHub
+- หน้าเว็บเก็บเฉพาะ Proxy URL ใน browser เช่น `https://ชื่อ-worker.workers.dev/api/prices`
+- Worker จำกัด Origin, จำกัดประมาณ 12 requests/IP/นาที และ cache 30 วินาที
+- ระบบดึงทั้ง XAU/USD และ WTI/USD พร้อมกันเมื่อกดอัปเดต หรือทุก 60 วินาทีเมื่อเปิด Auto
 - ราคาที่ดึงได้จะถูกบันทึกเป็นราคาปัจจุบันในพอร์ตและใช้คำนวณ P/L, Equity และแบบจำลองทุนร่วม
 - ราคา spot อาจต่างจาก Bid/Ask ของ XM เพราะ spread, feed และเวลาปรับราคาต่างกัน ควรตรวจราคาใน MT4/MT5 ก่อนใช้ตัดสินใจจริง
+
+### ตั้งค่า Cloudflare Worker
+
+1. สร้าง Worker แล้ววางโค้ดจาก `scripts/cloudflare-worker-template.js`
+2. เพิ่ม Secret ชื่อ `TWELVE_DATA_API_KEY`
+3. เพิ่ม Variable ชื่อ `ALLOWED_ORIGINS` ค่า `https://tinala-ct.github.io`
+4. Deploy แล้วคัดลอก URL พร้อม path `/api/prices`
+5. ที่หน้า RiskLedger กดไอคอนกุญแจแล้วใส่ Proxy URL — ไม่ใช่ API key
 
 Alpaca ไม่รองรับ `XAUUSD` และ `USOIL` โดยตรง ส่วน `GLD` และ `USO` เป็น ETF คนละหน่วยกับ spot/CFD จึงไม่นำมาใช้แทนราคาในสูตร
 
@@ -56,6 +83,9 @@ pnpm dev
 ```bash
 pnpm test:calc
 pnpm test:market
+pnpm test:sync
+pnpm lint
+pnpm exec tsc --noEmit
 pnpm build
 ```
 

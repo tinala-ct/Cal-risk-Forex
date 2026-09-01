@@ -5,22 +5,21 @@ import {
   MARKET_DATA_SYMBOLS,
 } from '../lib/market-prices.ts';
 
-const requestedSymbols: string[] = [];
+let requestedUrl = '';
 const snapshot = await fetchCurrentMarketPrices(
-  'local-test-key',
+  'https://prices.example.workers.dev/api/prices',
   async (input) => {
-    const url = new URL(
+    requestedUrl =
       typeof input === 'string'
         ? input
         : input instanceof URL
           ? input.href
-          : input.url,
-    );
-    const symbol = url.searchParams.get('symbol') ?? '';
-    requestedSymbols.push(symbol);
-
+          : input.url;
     return new Response(
-      JSON.stringify({ price: symbol === 'XAU/USD' ? '3388.125' : '64.875' }),
+      JSON.stringify({
+        prices: { XAUUSD: 3388.125, USOIL: 64.875 },
+        fetchedAt: '2026-09-01T10:00:00.000Z',
+      }),
       { status: 200, headers: { 'content-type': 'application/json' } },
     );
   },
@@ -30,23 +29,30 @@ assert.deepEqual(MARKET_DATA_SYMBOLS, {
   XAUUSD: 'XAU/USD',
   USOIL: 'WTI/USD',
 });
-assert.deepEqual(requestedSymbols.sort(), ['WTI/USD', 'XAU/USD']);
+assert.equal(requestedUrl, 'https://prices.example.workers.dev/api/prices');
 assert.equal(snapshot.prices.XAUUSD, 3388.125);
 assert.equal(snapshot.prices.USOIL, 64.875);
 
 await assert.rejects(
+  () => fetchCurrentMarketPrices(),
+  /ตั้งค่า Cloudflare Proxy URL/,
+);
+await assert.rejects(
+  () => fetchCurrentMarketPrices('http://prices.example.com/api/prices'),
+  /ต้องใช้ HTTPS/,
+);
+await assert.rejects(
   () =>
     fetchCurrentMarketPrices(
-      'bad-key',
+      'https://prices.example.workers.dev/api/prices',
       async () =>
-        new Response(
-          JSON.stringify({ status: 'error', message: 'API key is invalid' }),
-          { status: 401, headers: { 'content-type': 'application/json' } },
-        ),
+        new Response(JSON.stringify({ prices: { XAUUSD: 3388.125 } }), {
+          status: 200,
+        }),
     ),
-  /API key is invalid/,
+  /ดึงราคา XAU\/USD และ WTI\/USD/,
 );
 
 console.log(
-  'Market price checks passed: XAU/USD and WTI/USD mapping and errors.',
+  'Market price checks passed: secure proxy only, complete XAU/USD + WTI/USD payload and errors.',
 );

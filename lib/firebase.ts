@@ -16,7 +16,7 @@ import {
   type Unsubscribe,
 } from 'firebase/firestore';
 
-import type { PortfolioState } from './portfolio';
+import { parsePortfolioState, type PortfolioState } from './portfolio';
 
 export const firebaseConfig = {
   apiKey: 'AIzaSyC2TacZITnMFH8sIrM1DnhBYMcbHE18fuw',
@@ -60,7 +60,17 @@ export function subscribeToCloudPortfolio(
     portfolioDocRef,
     (snapshot) => {
       if (snapshot.exists()) {
-        onData(snapshot.data() as PortfolioState);
+        try {
+          onData(parsePortfolioState(snapshot.data()));
+        } catch (error) {
+          if (onError) {
+            onError(
+              error instanceof Error
+                ? error
+                : new Error('ข้อมูลพอร์ตบน Cloud ไม่ถูกต้อง'),
+            );
+          }
+        }
       }
     },
     (error) => {
@@ -78,7 +88,7 @@ export async function getCloudPortfolio(
   const portfolioDocRef = doc(db, 'portfolios', userId);
   const snapshot = await getDoc(portfolioDocRef);
   if (snapshot.exists()) {
-    return snapshot.data() as PortfolioState;
+    return parsePortfolioState(snapshot.data());
   }
   return null;
 }
