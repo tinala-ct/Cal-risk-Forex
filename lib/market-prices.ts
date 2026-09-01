@@ -1,6 +1,8 @@
 import type { SymbolCode } from '@/lib/portfolio';
 
 export const MARKET_DATA_PROVIDER = 'Twelve Data ผ่าน Proxy ที่ปลอดภัย';
+export const MARKET_PRICE_ENDPOINT =
+  'https://cal-risk-forex.chonnateefamilylove.workers.dev/api/prices';
 
 export const MARKET_DATA_SYMBOLS: Record<SymbolCode, string> = {
   XAUUSD: 'XAU/USD',

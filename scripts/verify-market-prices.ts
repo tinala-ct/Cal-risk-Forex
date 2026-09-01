@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   fetchCurrentMarketPrices,
   MARKET_DATA_SYMBOLS,
+  MARKET_PRICE_ENDPOINT,
 } from '../lib/market-prices.ts';
 
 let requestedUrl = '';
@@ -29,6 +30,10 @@ assert.deepEqual(MARKET_DATA_SYMBOLS, {
   XAUUSD: 'XAU/USD',
   USOIL: 'WTI/USD',
 });
+assert.equal(
+  MARKET_PRICE_ENDPOINT,
+  'https://cal-risk-forex.chonnateefamilylove.workers.dev/api/prices',
+);
 assert.equal(requestedUrl, 'https://prices.example.workers.dev/api/prices');
 assert.equal(snapshot.prices.XAUUSD, 3388.125);
 assert.equal(snapshot.prices.USOIL, 64.875);

@@ -52,10 +52,10 @@ firebase deploy --only firestore:rules
 
 ## เชื่อมราคาตลาดปัจจุบัน
 
-ปุ่ม **เชื่อมราคา** รองรับราคาอ้างอิง `XAU/USD` spot และ `WTI/USD` spot จาก [Twelve Data](https://twelvedata.com/commodities) ผ่าน Cloudflare Worker Proxy เท่านั้น แอปไม่ใช้ PAXG/USDT แทน XAUUSD และจะไม่ใช้ราคา Oil เก่าปะปนกับข้อมูลสด
+ระบบดึงราคาอ้างอิง `XAU/USD` spot และ `WTI/USD` spot จาก [Twelve Data](https://twelvedata.com/commodities) ผ่าน Cloudflare Worker โดยอัตโนมัติเมื่อเปิดหน้า และอัปเดตทุก 60 วินาที แอปไม่ใช้ PAXG/USDT แทน XAUUSD และจะไม่ใช้ราคา Oil เก่าปะปนกับข้อมูลสด
 
 - เก็บ `TWELVE_DATA_API_KEY` เป็น Cloudflare Secret ห้ามใส่ API key ในหน้าเว็บ, source code หรือ GitHub
-- หน้าเว็บเก็บเฉพาะ Proxy URL ใน browser เช่น `https://ชื่อ-worker.workers.dev/api/prices`
+- หน้าเว็บใช้ endpoint `https://cal-risk-forex.chonnateefamilylove.workers.dev/api/prices` ที่กำหนดใน source และไม่มีช่องกรอก API key หรือ Proxy URL
 - Worker จำกัด Origin, จำกัดประมาณ 12 requests/IP/นาที และ cache 30 วินาที
 - ระบบดึงทั้ง XAU/USD และ WTI/USD พร้อมกันเมื่อกดอัปเดต หรือทุก 60 วินาทีเมื่อเปิด Auto
 - ราคาที่ดึงได้จะถูกบันทึกเป็นราคาปัจจุบันในพอร์ตและใช้คำนวณ P/L, Equity และแบบจำลองทุนร่วม
@@ -66,8 +66,8 @@ firebase deploy --only firestore:rules
 1. สร้าง Worker แล้ววางโค้ดจาก `scripts/cloudflare-worker-template.js`
 2. เพิ่ม Secret ชื่อ `TWELVE_DATA_API_KEY`
 3. เพิ่ม Variable ชื่อ `ALLOWED_ORIGINS` ค่า `https://tinala-ct.github.io`
-4. Deploy แล้วคัดลอก URL พร้อม path `/api/prices`
-5. ที่หน้า RiskLedger กดไอคอนกุญแจแล้วใส่ Proxy URL — ไม่ใช่ API key
+4. Deploy Worker แล้วเปิดหน้า RiskLedger ระบบจะดึงราคาล่าสุดทันที
+5. หากต้องการทดสอบซ้ำ ให้กด **อัปเดตราคาตอนนี้** โดยไม่ต้องตั้งค่าบนหน้าเว็บ
 
 Alpaca ไม่รองรับ `XAUUSD` และ `USOIL` โดยตรง ส่วน `GLD` และ `USO` เป็น ETF คนละหน่วยกับ spot/CFD จึงไม่นำมาใช้แทนราคาในสูตร
 

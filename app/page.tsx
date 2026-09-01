@@ -9,7 +9,6 @@ import {
   CloudCheck,
   Download,
   History,
-  KeyRound,
   Landmark,
   LogIn,
   LogOut,
@@ -110,10 +109,13 @@ import {
 import {
   fetchCurrentMarketPrices,
   MARKET_DATA_PROVIDER,
+  MARKET_PRICE_ENDPOINT,
 } from '@/lib/market-prices';
 
-const MARKET_PROXY_STORAGE = 'riskledger-market-proxy-url';
-const LEGACY_MARKET_KEY_STORAGE = 'riskledger-twelve-data-api-key';
+const LEGACY_MARKET_STORAGE_KEYS = [
+  'riskledger-market-proxy-url',
+  'riskledger-twelve-data-api-key',
+] as const;
 const MARKET_UPDATED_AT_STORAGE = 'riskledger-market-updated-at';
 
 const nowForInput = () => {
@@ -156,12 +158,6 @@ export default function Home() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [cashOpen, setCashOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
-  const [marketOpen, setMarketOpen] = useState(false);
-  const [marketProxyUrl, setMarketProxyUrl] = useState(() => {
-    const configured = window.localStorage.getItem(MARKET_PROXY_STORAGE) ?? '';
-    const legacy = window.localStorage.getItem(LEGACY_MARKET_KEY_STORAGE) ?? '';
-    return configured || (/^https?:\/\//.test(legacy) ? legacy : '');
-  });
   const [marketStatus, setMarketStatus] = useState<'idle' | 'loading'>('idle');
   const [marketUpdatedAt, setMarketUpdatedAt] = useState(
     () => window.localStorage.getItem(MARKET_UPDATED_AT_STORAGE) ?? '',
@@ -171,7 +167,7 @@ export default function Home() {
     'OANDA:XAUUSD',
   );
   const [chartOpen, setChartOpen] = useState(true);
-  const [autoSync, setAutoSync] = useState(false);
+  const [autoSync, setAutoSync] = useState(true);
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [cloudSyncStatus, setCloudSyncStatus] = useState<
     'disconnected' | 'syncing' | 'synced' | 'error'
@@ -180,6 +176,7 @@ export default function Home() {
   const cloudReadyUserId = useRef<string | null>(null);
   const skipCloudSaveFingerprint = useRef<string | null>(null);
   const marketRequestInFlight = useRef(false);
+  const marketErrorNotified = useRef(false);
   const fileInput = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -187,14 +184,9 @@ export default function Home() {
   }, [state]);
 
   useEffect(() => {
-    const legacy = window.localStorage.getItem(LEGACY_MARKET_KEY_STORAGE) ?? '';
-    if (
-      /^https?:\/\//.test(legacy) &&
-      !window.localStorage.getItem(MARKET_PROXY_STORAGE)
-    ) {
-      window.localStorage.setItem(MARKET_PROXY_STORAGE, legacy);
+    for (const key of LEGACY_MARKET_STORAGE_KEYS) {
+      window.localStorage.removeItem(key);
     }
-    window.localStorage.removeItem(LEGACY_MARKET_KEY_STORAGE);
   }, []);
 
   // โหลดข้อมูลพอร์ตจาก IndexedDB ในเครื่องก่อน
@@ -366,68 +358,61 @@ export default function Home() {
     );
   };
 
-  const refreshMarketPrices = useCallback(
-    async (proxyUrl = marketProxyUrl) => {
-      if (marketRequestInFlight.current) return false;
-      marketRequestInFlight.current = true;
-      setMarketStatus('loading');
-      try {
-        const snapshot = await fetchCurrentMarketPrices(proxyUrl, fetch);
-        setState((current) =>
-          touchPortfolioState(
-            {
-              ...current,
-              currentPrices: snapshot.prices,
-            },
-            snapshot.fetchedAt,
-          ),
-        );
-        setMarketUpdatedAt(snapshot.fetchedAt);
-        window.localStorage.setItem(
-          MARKET_UPDATED_AT_STORAGE,
+  const refreshMarketPrices = useCallback(async () => {
+    if (marketRequestInFlight.current) return false;
+    marketRequestInFlight.current = true;
+    setMarketStatus('loading');
+    try {
+      const snapshot = await fetchCurrentMarketPrices(
+        MARKET_PRICE_ENDPOINT,
+        fetch,
+      );
+      setState((current) =>
+        touchPortfolioState(
+          {
+            ...current,
+            currentPrices: snapshot.prices,
+          },
           snapshot.fetchedAt,
-        );
-        setNotice('อัปเดต XAU/USD และ WTI/USD จาก Twelve Data เรียบร้อยแล้ว');
-        return true;
-      } catch (error) {
+        ),
+      );
+      setMarketUpdatedAt(snapshot.fetchedAt);
+      window.localStorage.setItem(
+        MARKET_UPDATED_AT_STORAGE,
+        snapshot.fetchedAt,
+      );
+      marketErrorNotified.current = false;
+      setNotice('อัปเดต XAU/USD และ WTI/USD จาก Twelve Data เรียบร้อยแล้ว');
+      return true;
+    } catch (error) {
+      if (!marketErrorNotified.current) {
         setNotice(
-          error instanceof Error ? error.message : 'เชื่อมต่อผู้ให้บริการราคาไม่สำเร็จ',
+          error instanceof Error && error.message !== 'Failed to fetch'
+            ? error.message
+            : 'เชื่อม Cloudflare Worker ไม่สำเร็จ กรุณาตรวจ TWELVE_DATA_API_KEY ใน Cloudflare Secret',
         );
-        return false;
-      } finally {
-        marketRequestInFlight.current = false;
-        setMarketStatus('idle');
+        marketErrorNotified.current = true;
       }
-    },
-    [marketProxyUrl],
-  );
+      return false;
+    } finally {
+      marketRequestInFlight.current = false;
+      setMarketStatus('idle');
+    }
+  }, []);
 
   useEffect(() => {
-    if (!autoSync || !marketProxyUrl) return;
+    if (!autoSync) return;
+    const initialTimer = window.setTimeout(() => {
+      void refreshMarketPrices();
+    }, 0);
     const timer = window.setInterval(() => {
       void refreshMarketPrices();
     }, 60_000);
-    return () => window.clearInterval(timer);
-  }, [autoSync, marketProxyUrl, refreshMarketPrices]);
-
-  const connectMarketPrices = async (proxyUrl: string) => {
-    const normalizedUrl = proxyUrl.trim();
-    if (await refreshMarketPrices(normalizedUrl)) {
-      setMarketProxyUrl(normalizedUrl);
-      window.localStorage.setItem(MARKET_PROXY_STORAGE, normalizedUrl);
-      setMarketOpen(false);
-    }
-  };
-
-  const disconnectMarketPrices = () => {
-    window.localStorage.removeItem(MARKET_PROXY_STORAGE);
-    window.localStorage.removeItem(MARKET_UPDATED_AT_STORAGE);
-    setMarketProxyUrl('');
-    setMarketUpdatedAt('');
-    setAutoSync(false);
-    setMarketOpen(false);
-    setNotice('ลบ Proxy URL แล้ว ราคาที่บันทึกในพอร์ตยังคงเดิม');
-  };
+    return () => {
+      window.clearTimeout(initialTimer);
+      window.clearInterval(timer);
+    };
+  }, [autoSync, refreshMarketPrices]);
 
   const exportBackup = () => {
     const blob = new Blob([JSON.stringify(state, null, 2)], {
@@ -634,7 +619,7 @@ export default function Home() {
               <span className="mt-0.5 block">
                 {marketUpdatedAt
                   ? `ดึงล่าสุด ${dateTime(marketUpdatedAt)}`
-                  : 'กด "ดึงราคาตลาดสด" หรือกรอกราคาเอง'}
+                  : 'ระบบจะดึงราคาให้อัตโนมัติเมื่อเปิดหน้าเว็บ'}
               </span>
             </div>
             <Button
@@ -646,11 +631,6 @@ export default function Home() {
                   : 'text-muted-foreground'
               }
               onClick={async () => {
-                if (!marketProxyUrl) {
-                  setMarketOpen(true);
-                  setNotice('ตั้งค่า Proxy URL ก่อนเปิด Auto Sync');
-                  return;
-                }
                 if (autoSync) {
                   setAutoSync(false);
                 } else if (await refreshMarketPrices()) {
@@ -675,15 +655,7 @@ export default function Home() {
               <RefreshCw
                 className={marketStatus === 'loading' ? 'animate-spin' : ''}
               />
-              ดึงราคาตลาดสด
-            </Button>
-            <Button
-              size="icon-sm"
-              variant="ghost"
-              aria-label="ตั้งค่าผู้ให้บริการราคา"
-              onClick={() => setMarketOpen(true)}
-            >
-              <KeyRound />
+              อัปเดตราคาตอนนี้
             </Button>
           </div>
           <p className="text-[11px] leading-4 text-muted-foreground sm:col-span-2 xl:col-span-3">
@@ -1087,16 +1059,6 @@ export default function Home() {
               );
             }
           }}
-        />
-      )}
-      {marketOpen && (
-        <MarketPriceDialog
-          open={marketOpen}
-          onOpenChange={setMarketOpen}
-          initialProxyUrl={marketProxyUrl}
-          busy={marketStatus === 'loading'}
-          onConnect={connectMarketPrices}
-          onDisconnect={disconnectMarketPrices}
         />
       )}
       {settingsOpen && (
@@ -2131,100 +2093,6 @@ function SettingsDialog({
             <Button type="submit" disabled={locked}>
               บันทึกทุนตั้งต้น
             </Button>
-          </DialogFooter>
-        </form>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-function MarketPriceDialog({
-  open,
-  onOpenChange,
-  initialProxyUrl,
-  busy,
-  onConnect,
-  onDisconnect,
-}: {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  initialProxyUrl: string;
-  busy: boolean;
-  onConnect: (proxyUrl: string) => Promise<void>;
-  onDisconnect: () => void;
-}) {
-  const [proxyUrl, setProxyUrl] = useState(initialProxyUrl);
-  const submit = (event: React.SyntheticEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    if (proxyUrl.trim()) void onConnect(proxyUrl);
-  };
-
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-lg">
-        <DialogHeader>
-          <DialogTitle>เชื่อมราคาตลาด XAU และ Oil</DialogTitle>
-          <DialogDescription>
-            ใช้ XAU/USD spot และ WTI/USD spot จาก Twelve Data
-            แล้วนำค่าที่ดึงได้มาใส่ในช่องราคาปัจจุบัน
-          </DialogDescription>
-        </DialogHeader>
-        <form onSubmit={submit} className="grid gap-4">
-          <Field label="Cloudflare Proxy URL">
-            <Input
-              type="url"
-              autoComplete="off"
-              value={proxyUrl}
-              onChange={(event) => setProxyUrl(event.target.value)}
-              placeholder="https://ชื่อ-worker.workers.dev/api/prices"
-            />
-          </Field>
-          <div className="grid gap-2 rounded-lg bg-sky-50 px-3 py-3 text-xs leading-5 text-sky-950">
-            <p>
-              <strong>แหล่งราคา:</strong> XAU/USD และ WTI/USD Commodity Aggregate
-            </p>
-            <p>
-              <strong>ความปลอดภัย:</strong> API key ต้องเก็บเป็น Cloudflare Secret
-              เท่านั้น หน้าเว็บบันทึกเฉพาะ URL และจะไม่รับ API key โดยตรง
-            </p>
-            <p>
-              <strong>URL ที่ถูกต้อง:</strong> ต้องลงท้ายด้วย <code>/api/prices</code>
-            </p>
-          </div>
-          <div className="rounded-lg bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">
-            ราคานี้เป็นราคาอ้างอิง spot ไม่ใช่ Bid/Ask ของ XM และไม่ได้รวม spread
-            หรือช่วงตลาดปิด
-          </div>
-          <a
-            className="text-sm font-medium text-primary underline underline-offset-4"
-            href="https://twelvedata.com/"
-            target="_blank"
-            rel="noreferrer"
-          >
-            สมัครหรือเปิดหน้า API key ของ Twelve Data
-          </a>
-          <DialogFooter className="sm:justify-between">
-            <Button
-              type="button"
-              variant="ghost"
-              disabled={!initialProxyUrl || busy}
-              onClick={onDisconnect}
-            >
-              ลบ Proxy URL
-            </Button>
-            <span className="flex gap-2">
-              <Button
-                type="button"
-                variant="outline"
-                onClick={() => onOpenChange(false)}
-              >
-                ยกเลิก
-              </Button>
-              <Button type="submit" disabled={!proxyUrl.trim() || busy}>
-                {busy ? <RefreshCw className="animate-spin" /> : <KeyRound />}{' '}
-                บันทึกและดึงราคา
-              </Button>
-            </span>
           </DialogFooter>
         </form>
       </DialogContent>
