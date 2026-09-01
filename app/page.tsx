@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArchiveRestore,
   ArrowDownRight,
@@ -12,9 +12,7 @@ import {
   Landmark,
   LogIn,
   LogOut,
-  PencilLine,
   Plus,
-  RefreshCw,
   Save,
   Settings2,
   ShieldAlert,
@@ -106,18 +104,6 @@ import {
   comparePortfolioFreshness,
   portfolioFingerprint,
 } from '@/lib/portfolio-sync';
-import {
-  fetchCurrentMarketPrices,
-  MARKET_DATA_PROVIDER,
-  MARKET_PRICE_ENDPOINT,
-} from '@/lib/market-prices';
-
-const LEGACY_MARKET_STORAGE_KEYS = [
-  'riskledger-market-proxy-url',
-  'riskledger-twelve-data-api-key',
-] as const;
-const MARKET_UPDATED_AT_STORAGE = 'riskledger-market-updated-at';
-
 const nowForInput = () => {
   const date = new Date();
   date.setMinutes(date.getMinutes() - date.getTimezoneOffset());
@@ -158,16 +144,11 @@ export default function Home() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [cashOpen, setCashOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
-  const [marketStatus, setMarketStatus] = useState<'idle' | 'loading'>('idle');
-  const [marketUpdatedAt, setMarketUpdatedAt] = useState(
-    () => window.localStorage.getItem(MARKET_UPDATED_AT_STORAGE) ?? '',
-  );
   const [closingOrder, setClosingOrder] = useState<Order | null>(null);
   const [chartSymbol, setChartSymbol] = useState<'OANDA:XAUUSD' | 'TVC:USOIL'>(
     'OANDA:XAUUSD',
   );
   const [chartOpen, setChartOpen] = useState(true);
-  const [autoSync, setAutoSync] = useState(true);
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [cloudSyncStatus, setCloudSyncStatus] = useState<
     'disconnected' | 'syncing' | 'synced' | 'error'
@@ -175,19 +156,11 @@ export default function Home() {
   const stateRef = useRef(state);
   const cloudReadyUserId = useRef<string | null>(null);
   const skipCloudSaveFingerprint = useRef<string | null>(null);
-  const marketRequestInFlight = useRef(false);
-  const marketErrorNotified = useRef(false);
   const fileInput = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     stateRef.current = state;
   }, [state]);
-
-  useEffect(() => {
-    for (const key of LEGACY_MARKET_STORAGE_KEYS) {
-      window.localStorage.removeItem(key);
-    }
-  }, []);
 
   // โหลดข้อมูลพอร์ตจาก IndexedDB ในเครื่องก่อน
   useEffect(() => {
@@ -357,62 +330,6 @@ export default function Home() {
       }),
     );
   };
-
-  const refreshMarketPrices = useCallback(async () => {
-    if (marketRequestInFlight.current) return false;
-    marketRequestInFlight.current = true;
-    setMarketStatus('loading');
-    try {
-      const snapshot = await fetchCurrentMarketPrices(
-        MARKET_PRICE_ENDPOINT,
-        fetch,
-      );
-      setState((current) =>
-        touchPortfolioState(
-          {
-            ...current,
-            currentPrices: snapshot.prices,
-          },
-          snapshot.fetchedAt,
-        ),
-      );
-      setMarketUpdatedAt(snapshot.fetchedAt);
-      window.localStorage.setItem(
-        MARKET_UPDATED_AT_STORAGE,
-        snapshot.fetchedAt,
-      );
-      marketErrorNotified.current = false;
-      setNotice('อัปเดต XAU/USD และ WTI/USD จาก Twelve Data เรียบร้อยแล้ว');
-      return true;
-    } catch (error) {
-      if (!marketErrorNotified.current) {
-        setNotice(
-          error instanceof Error && error.message !== 'Failed to fetch'
-            ? error.message
-            : 'เชื่อม Cloudflare Worker ไม่สำเร็จ กรุณาตรวจ TWELVE_DATA_API_KEY ใน Cloudflare Secret',
-        );
-        marketErrorNotified.current = true;
-      }
-      return false;
-    } finally {
-      marketRequestInFlight.current = false;
-      setMarketStatus('idle');
-    }
-  }, []);
-
-  useEffect(() => {
-    if (!autoSync) return;
-    const initialTimer = window.setTimeout(() => {
-      void refreshMarketPrices();
-    }, 0);
-    const timer = window.setInterval(() => {
-      void refreshMarketPrices();
-    }, 60_000);
-    return () => {
-      window.clearTimeout(initialTimer);
-      window.clearInterval(timer);
-    };
-  }, [autoSync, refreshMarketPrices]);
 
   const exportBackup = () => {
     const blob = new Blob([JSON.stringify(state, null, 2)], {
@@ -591,7 +508,7 @@ export default function Home() {
           </div>
         </header>
 
-        <section className="price-strip mb-4 grid gap-3 rounded-xl border border-border/75 bg-card/80 p-3 shadow-[0_14px_42px_-38px_rgb(15_23_42/0.8)] sm:grid-cols-2 xl:grid-cols-[1fr_1fr_minmax(310px,auto)] xl:items-center">
+        <section className="price-strip mb-4 grid gap-3 rounded-xl border border-border/75 bg-card/80 p-3 shadow-[0_14px_42px_-38px_rgb(15_23_42/0.8)] sm:grid-cols-2">
           <PriceInput
             symbol="XAUUSD"
             label="ราคาทองปัจจุบัน"
@@ -604,64 +521,6 @@ export default function Home() {
             value={state.currentPrices.USOIL}
             onChange={updatePrice}
           />
-          <div className="flex flex-wrap items-center gap-2 rounded-lg bg-muted/65 px-3 py-2 sm:col-span-2 xl:col-span-1">
-            <div className="min-w-44 flex-1 text-xs text-muted-foreground">
-              <span className="flex items-center gap-2 font-medium text-foreground">
-                {marketUpdatedAt ? (
-                  <RefreshCw className="size-4 text-emerald-600" />
-                ) : (
-                  <PencilLine className="size-4 text-primary" />
-                )}
-                {marketUpdatedAt
-                  ? MARKET_DATA_PROVIDER
-                  : 'ราคา XM / ราคาที่กรอกเอง'}
-              </span>
-              <span className="mt-0.5 block">
-                {marketUpdatedAt
-                  ? `ดึงล่าสุด ${dateTime(marketUpdatedAt)}`
-                  : 'ระบบจะดึงราคาให้อัตโนมัติเมื่อเปิดหน้าเว็บ'}
-              </span>
-            </div>
-            <Button
-              size="sm"
-              variant={autoSync ? 'default' : 'outline'}
-              className={
-                autoSync
-                  ? 'bg-emerald-600 hover:bg-emerald-700 text-white shadow-sm'
-                  : 'text-muted-foreground'
-              }
-              onClick={async () => {
-                if (autoSync) {
-                  setAutoSync(false);
-                } else if (await refreshMarketPrices()) {
-                  setAutoSync(true);
-                }
-              }}
-              title="ดึงราคา XAU/USD และ WTI/USD อัตโนมัติทุก 60 วินาที"
-            >
-              <span
-                className={`inline-block size-2 rounded-full mr-1.5 ${
-                  autoSync ? 'bg-white animate-pulse' : 'bg-emerald-500'
-                }`}
-              />
-              {autoSync ? 'Auto (60s)' : 'เปิด Auto'}
-            </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={marketStatus === 'loading'}
-              onClick={() => void refreshMarketPrices()}
-            >
-              <RefreshCw
-                className={marketStatus === 'loading' ? 'animate-spin' : ''}
-              />
-              อัปเดตราคาตอนนี้
-            </Button>
-          </div>
-          <p className="text-[11px] leading-4 text-muted-foreground sm:col-span-2 xl:col-span-3">
-            ราคาตลาดเป็น XAU/USD spot และ WTI/USD spot จาก Twelve Data อาจต่างจาก
-            Bid/Ask ของ XM; ตรวจราคาใน MT4/MT5 ก่อนใช้ตัดสินใจจริง
-          </p>
         </section>
 
         <section className="mb-4">

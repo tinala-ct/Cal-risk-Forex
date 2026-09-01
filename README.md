@@ -50,26 +50,9 @@ Balance = ทุนตั้งต้น + ฝาก - ถอน + รายก�
 firebase deploy --only firestore:rules
 ```
 
-## เชื่อมราคาตลาดปัจจุบัน
+## ราคาปัจจุบัน
 
-ระบบดึงราคาอ้างอิง `XAU/USD` spot และ `WTI/USD` spot จาก [Twelve Data](https://twelvedata.com/commodities) ผ่าน Cloudflare Worker โดยอัตโนมัติเมื่อเปิดหน้า และอัปเดตทุก 60 วินาที แอปไม่ใช้ PAXG/USDT แทน XAUUSD และจะไม่ใช้ราคา Oil เก่าปะปนกับข้อมูลสด
-
-- เก็บ `TWELVE_DATA_API_KEY` เป็น Cloudflare Secret ห้ามใส่ API key ในหน้าเว็บ, source code หรือ GitHub
-- หน้าเว็บใช้ endpoint `https://cal-risk-forex.chonnateefamilylove.workers.dev/api/prices` ที่กำหนดใน source และไม่มีช่องกรอก API key หรือ Proxy URL
-- Worker จำกัด Origin, จำกัดประมาณ 12 requests/IP/นาที และ cache 30 วินาที
-- ระบบดึงทั้ง XAU/USD และ WTI/USD พร้อมกันเมื่อกดอัปเดต หรือทุก 60 วินาทีเมื่อเปิด Auto
-- ราคาที่ดึงได้จะถูกบันทึกเป็นราคาปัจจุบันในพอร์ตและใช้คำนวณ P/L, Equity และแบบจำลองทุนร่วม
-- ราคา spot อาจต่างจาก Bid/Ask ของ XM เพราะ spread, feed และเวลาปรับราคาต่างกัน ควรตรวจราคาใน MT4/MT5 ก่อนใช้ตัดสินใจจริง
-
-### ตั้งค่า Cloudflare Worker
-
-1. สร้าง Worker แล้ววางโค้ดจาก `scripts/cloudflare-worker-template.js`
-2. เพิ่ม Secret ชื่อ `TWELVE_DATA_API_KEY`
-3. เพิ่ม Variable ชื่อ `ALLOWED_ORIGINS` ค่า `https://tinala-ct.github.io`
-4. Deploy Worker แล้วเปิดหน้า RiskLedger ระบบจะดึงราคาล่าสุดทันที
-5. หากต้องการทดสอบซ้ำ ให้กด **อัปเดตราคาตอนนี้** โดยไม่ต้องตั้งค่าบนหน้าเว็บ
-
-Alpaca ไม่รองรับ `XAUUSD` และ `USOIL` โดยตรง ส่วน `GLD` และ `USO` เป็น ETF คนละหน่วยกับ spot/CFD จึงไม่นำมาใช้แทนราคาในสูตร
+กรอกราคา XAUUSD และ USOIL จากบัญชี XM ในช่องราคาปัจจุบันด้วยตนเอง ค่าจะถูกบันทึกพร้อมข้อมูลพอร์ตและใช้คำนวณ P/L, Equity และแบบจำลองทุนร่วม
 
 ## เปิดใช้งานในเครื่อง
 
@@ -82,7 +65,6 @@ pnpm dev
 
 ```bash
 pnpm test:calc
-pnpm test:market
 pnpm test:sync
 pnpm lint
 pnpm exec tsc --noEmit

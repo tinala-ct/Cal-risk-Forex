@@ -10,7 +10,6 @@
     "build": "vite build",
     "preview": "vite preview",
     "test:calc": "node --experimental-strip-types scripts/verify-calculations.ts",
-    "test:market": "node --experimental-strip-types scripts/verify-market-prices.ts",
     "test:sync": "node --experimental-strip-types scripts/verify-sync.ts",
     "lint": "oxlint app lib src scripts components/tradingview-chart.tsx --ignore-pattern 'components/ui/**' --ignore-pattern 'hooks/**' -A no-img-element --deny-warnings",
     "format": "oxfmt"
