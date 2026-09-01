@@ -1139,10 +1139,49 @@ function PriceInput({
   value: number;
   onChange: (symbol: SymbolCode, value: string) => void;
 }) {
+  const [localValue, setLocalValue] = useState(() =>
+    value > 0 ? value.toFixed(2) : '',
+  );
+  const [prevValue, setPrevValue] = useState(value);
+  const [isFocused, setIsFocused] = useState(false);
+
+  if (value !== prevValue) {
+    setPrevValue(value);
+    if (!isFocused) {
+      setLocalValue(value > 0 ? value.toFixed(2) : '');
+    }
+  }
+
+  const handleChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const text = event.target.value;
+    // อนุญาตเฉพาะตัวเลขและจุดทศนิยมไม่เกิน 2 ตำแหน่ง
+    if (/^\d*\.?\d{0,2}$/.test(text) || text === '') {
+      setLocalValue(text);
+      if (text !== '' && !text.endsWith('.')) {
+        const num = parseFloat(text);
+        if (!isNaN(num) && num > 0) {
+          onChange(symbol, text);
+        }
+      }
+    }
+  };
+
+  const handleBlur = () => {
+    setIsFocused(false);
+    const num = parseFloat(localValue);
+    if (!isNaN(num) && num > 0) {
+      const formatted = num.toFixed(2);
+      setLocalValue(formatted);
+      onChange(symbol, formatted);
+    } else {
+      setLocalValue(value > 0 ? value.toFixed(2) : '');
+    }
+  };
+
   return (
     <label className="flex min-w-0 items-center gap-3 rounded-lg border border-transparent px-2 py-1 transition hover:border-border hover:bg-background/65">
       <span
-        className={`flex size-9 shrink-0 items-center justify-center rounded-lg font-mono text-xs font-bold ${symbol === 'XAUUSD' ? 'bg-amber-100 text-amber-800' : 'bg-slate-900 text-white'}`}
+        className={`flex size-9 shrink-0 items-center justify-center rounded-lg font-mono text-xs font-bold ${symbol === 'XAUUSD' ? 'bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300' : 'bg-slate-900 text-white dark:bg-slate-800'}`}
       >
         {symbol === 'XAUUSD' ? 'AU' : 'WTI'}
       </span>
@@ -1152,12 +1191,14 @@ function PriceInput({
       </span>
       <span className="text-muted-foreground">$</span>
       <Input
-        className="w-28 text-right font-mono font-semibold sm:w-36"
-        type="number"
-        min="0"
-        step="0.01"
-        value={value}
-        onChange={(event) => onChange(symbol, event.target.value)}
+        className="w-28 text-right font-mono font-semibold sm:w-36 [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+        type="text"
+        inputMode="decimal"
+        placeholder="0.00"
+        value={localValue}
+        onFocus={() => setIsFocused(true)}
+        onChange={handleChange}
+        onBlur={handleBlur}
       />
     </label>
   );

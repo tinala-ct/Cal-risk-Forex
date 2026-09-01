@@ -139,4 +139,14 @@ body {
   html {
     @apply font-sans;
   }
+
+  /* ซ่อนลูกศรขึ้นลง (spin buttons) ในช่องกรอกตัวเลข */
+  input[type='number']::-webkit-outer-spin-button,
+  input[type='number']::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+  input[type='number'] {
+    -moz-appearance: textfield;
+  }
 }
