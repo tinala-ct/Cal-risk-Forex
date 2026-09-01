@@ -144,6 +144,15 @@ export default function Home() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [cashOpen, setCashOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [orderAssetFilter, setOrderAssetFilter] = useState<'ALL' | SymbolCode>(
+    'ALL',
+  );
+  const [orderSortField, setOrderSortField] = useState<
+    'openedAt' | 'entryPrice' | 'openLots' | 'pnl'
+  >('openedAt');
+  const [orderSortDirection, setOrderSortDirection] = useState<'asc' | 'desc'>(
+    'desc',
+  );
   const [closingOrder, setClosingOrder] = useState<Order | null>(null);
   const [chartSymbol, setChartSymbol] = useState<'OANDA:XAUUSD' | 'TVC:USOIL'>(
     'OANDA:XAUUSD',
@@ -319,6 +328,39 @@ export default function Home() {
     (total, order) => total + order.openLots,
     0,
   );
+  const visibleOpenOrders = useMemo(() => {
+    const filtered =
+      orderAssetFilter === 'ALL'
+        ? openOrders
+        : openOrders.filter((order) => order.symbol === orderAssetFilter);
+    const valueOf = (order: Order) => {
+      switch (orderSortField) {
+        case 'entryPrice':
+          return order.entryPrice;
+        case 'openLots':
+          return order.openLots;
+        case 'pnl':
+          return calculateOrderUnrealized(
+            order,
+            state.currentPrices[order.symbol],
+            getContractSize(order.symbol),
+          );
+        default:
+          return Date.parse(order.openedAt);
+      }
+    };
+    const direction = orderSortDirection === 'asc' ? 1 : -1;
+    return [...filtered].sort((a, b) => {
+      const difference = valueOf(a) - valueOf(b);
+      return difference ? difference * direction : a.id.localeCompare(b.id);
+    });
+  }, [
+    openOrders,
+    orderAssetFilter,
+    orderSortDirection,
+    orderSortField,
+    state.currentPrices,
+  ]);
 
   const updatePrice = (symbol: SymbolCode, value: string) => {
     const price = Number(value);
@@ -748,61 +790,148 @@ export default function Home() {
             </CardHeader>
             <CardContent className="px-0">
               {openOrders.length ? (
-                <Table>
-                  <TableHeader>
-                    <TableRow className="bg-muted/45 hover:bg-muted/45">
-                      <TableHead className="pl-4">เปิดเมื่อ</TableHead>
-                      <TableHead>สินทรัพย์</TableHead>
-                      <TableHead>ฝั่ง</TableHead>
-                      <TableHead className="text-right">ราคาเข้า</TableHead>
-                      <TableHead className="text-right">Lot คงเหลือ</TableHead>
-                      <TableHead className="text-right">P/L</TableHead>
-                      <TableHead className="pr-4 text-right">จัดการ</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {openOrders.map((order) => {
-                      const pnl = calculateOrderUnrealized(
-                        order,
-                        state.currentPrices[order.symbol],
-                        getContractSize(order.symbol),
-                      );
-                      return (
-                        <TableRow key={order.id}>
-                          <TableCell className="pl-4 text-xs text-muted-foreground">
-                            {dateTime(order.openedAt)}
-                          </TableCell>
-                          <TableCell className="font-semibold">
-                            {order.symbol}
-                          </TableCell>
-                          <TableCell>
-                            <SideBadge side={order.side} />
-                          </TableCell>
-                          <TableCell className="text-right font-mono">
-                            {number(order.entryPrice)}
-                          </TableCell>
-                          <TableCell className="text-right font-mono">
-                            {number(order.openLots, 2)}
-                          </TableCell>
-                          <TableCell
-                            className={`text-right font-mono ${pnl >= 0 ? 'text-emerald-700' : 'text-red-700'}`}
-                          >
-                            {signedMoney(pnl)}
-                          </TableCell>
-                          <TableCell className="pr-4 text-right">
-                            <Button
-                              size="sm"
-                              variant="outline"
-                              onClick={() => setClosingOrder(order)}
-                            >
-                              ปิดออเดอร์
-                            </Button>
-                          </TableCell>
+                <>
+                  <div className="grid gap-2 border-b border-border/70 px-4 py-3 sm:grid-cols-[minmax(150px,0.8fr)_minmax(170px,1fr)_auto] sm:items-end">
+                    <Field label="กรองสินทรัพย์">
+                      <NativeSelect
+                        className="w-full"
+                        value={orderAssetFilter}
+                        onChange={(event) =>
+                          setOrderAssetFilter(
+                            event.target.value as 'ALL' | SymbolCode,
+                          )
+                        }
+                      >
+                        <NativeSelectOption value="ALL">
+                          ทั้งหมด ({openOrders.length})
+                        </NativeSelectOption>
+                        <NativeSelectOption value="XAUUSD">
+                          XAUUSD (
+                          {
+                            openOrders.filter(
+                              (order) => order.symbol === 'XAUUSD',
+                            ).length
+                          }
+                          )
+                        </NativeSelectOption>
+                        <NativeSelectOption value="USOIL">
+                          USOIL (
+                          {
+                            openOrders.filter(
+                              (order) => order.symbol === 'USOIL',
+                            ).length
+                          }
+                          )
+                        </NativeSelectOption>
+                      </NativeSelect>
+                    </Field>
+                    <Field label="เรียงตาม">
+                      <NativeSelect
+                        className="w-full"
+                        value={orderSortField}
+                        onChange={(event) =>
+                          setOrderSortField(
+                            event.target.value as typeof orderSortField,
+                          )
+                        }
+                      >
+                        <NativeSelectOption value="openedAt">
+                          วันที่เปิด
+                        </NativeSelectOption>
+                        <NativeSelectOption value="entryPrice">
+                          ราคาเข้า
+                        </NativeSelectOption>
+                        <NativeSelectOption value="openLots">
+                          Lot คงเหลือ
+                        </NativeSelectOption>
+                        <NativeSelectOption value="pnl">P/L</NativeSelectOption>
+                      </NativeSelect>
+                    </Field>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={() =>
+                        setOrderSortDirection((current) =>
+                          current === 'asc' ? 'desc' : 'asc',
+                        )
+                      }
+                      aria-label="สลับลำดับการเรียงออเดอร์"
+                    >
+                      {orderSortDirection === 'asc' ? (
+                        <>
+                          <ArrowUpRight /> น้อย → มาก
+                        </>
+                      ) : (
+                        <>
+                          <ArrowDownRight /> มาก → น้อย
+                        </>
+                      )}
+                    </Button>
+                  </div>
+                  {visibleOpenOrders.length ? (
+                    <Table>
+                      <TableHeader>
+                        <TableRow className="bg-muted/45 hover:bg-muted/45">
+                          <TableHead className="pl-4">เปิดเมื่อ</TableHead>
+                          <TableHead>สินทรัพย์</TableHead>
+                          <TableHead>ฝั่ง</TableHead>
+                          <TableHead className="text-right">ราคาเข้า</TableHead>
+                          <TableHead className="text-right">
+                            Lot คงเหลือ
+                          </TableHead>
+                          <TableHead className="text-right">P/L</TableHead>
+                          <TableHead className="pr-4 text-right">
+                            จัดการ
+                          </TableHead>
                         </TableRow>
-                      );
-                    })}
-                  </TableBody>
-                </Table>
+                      </TableHeader>
+                      <TableBody>
+                        {visibleOpenOrders.map((order) => {
+                          const pnl = calculateOrderUnrealized(
+                            order,
+                            state.currentPrices[order.symbol],
+                            getContractSize(order.symbol),
+                          );
+                          return (
+                            <TableRow key={order.id}>
+                              <TableCell className="pl-4 text-xs text-muted-foreground">
+                                {dateTime(order.openedAt)}
+                              </TableCell>
+                              <TableCell className="font-semibold">
+                                {order.symbol}
+                              </TableCell>
+                              <TableCell>
+                                <SideBadge side={order.side} />
+                              </TableCell>
+                              <TableCell className="text-right font-mono">
+                                {number(order.entryPrice)}
+                              </TableCell>
+                              <TableCell className="text-right font-mono">
+                                {number(order.openLots, 2)}
+                              </TableCell>
+                              <TableCell
+                                className={`text-right font-mono ${pnl >= 0 ? 'text-emerald-700' : 'text-red-700'}`}
+                              >
+                                {signedMoney(pnl)}
+                              </TableCell>
+                              <TableCell className="pr-4 text-right">
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  onClick={() => setClosingOrder(order)}
+                                >
+                                  ปิดออเดอร์
+                                </Button>
+                              </TableCell>
+                            </TableRow>
+                          );
+                        })}
+                      </TableBody>
+                    </Table>
+                  ) : (
+                    <EmptyState label="ไม่มีออเดอร์ที่ตรงกับตัวกรองนี้" />
+                  )}
+                </>
               ) : (
                 <EmptyState label="พอร์ตว่าง — เพิ่มออเดอร์ใหม่ได้เลย" />
               )}
