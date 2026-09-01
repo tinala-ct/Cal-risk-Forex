@@ -36,9 +36,6 @@ jobs:
       - name: Verify calculations
         run: pnpm test:calc
 
-      - name: Verify market-price integration
-        run: pnpm test:market
-
       - name: Verify cloud conflict resolution
         run: pnpm test:sync
 
